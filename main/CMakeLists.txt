@@ -5,10 +5,12 @@ idf_component_register(
         "ch9329.c"
         "storage.c"
         "button.c"
+        "led_status.c"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         bt
         nvs_flash
         driver
         esp_timer
+        esp_driver_rmt
 )

@@ -14,9 +14,9 @@
 
 // UART for CH9329 communication
 #define CH9329_UART_NUM         UART_NUM_1
-#define CH9329_UART_TX_PIN      GPIO_NUM_26
-#define CH9329_UART_RX_PIN      GPIO_NUM_36
-#define CH9329_UART_BAUD_RATE   9600
+#define CH9329_UART_TX_PIN      GPIO_NUM_32
+#define CH9329_UART_RX_PIN      GPIO_NUM_33
+#define CH9329_UART_BAUD_RATE   115200
 
 // Built-in button on M5Stamp Pico
 #define BUTTON_GPIO             GPIO_NUM_39

@@ -16,7 +16,7 @@ This project enables using a Bluetooth keyboard with PCs that don't have Bluetoo
 - **M5Stamp Pico** (ESP32-PICO-D4)
   - Compact form factor
   - Built-in button (GPIO39)
-  - RGB LED SK6812 (GPIO27) - Reserved for future use
+  - RGB LED SK6812 (GPIO27) - Status indicator
 
 ### Required Components
 - M5Stamp Pico or compatible ESP32 board
@@ -27,12 +27,12 @@ This project enables using a Bluetooth keyboard with PCs that don't have Bluetoo
 
 | M5Stamp Pico | CH9329 Module |
 |--------------|---------------|
-| GPIO26 (TX)  | RXD           |
-| GPIO36 (RX)  | TXD           |
+| GPIO32 (TX)  | RXD           |
+| GPIO33 (RX)  | TXD           |
 | GND          | GND           |
 | 3.3V         | VCC (optional if USB powered) |
 
-**Note:** The CH9329 module is typically powered via USB from the target PC.
+**Note:** The CH9329 module is typically powered via USB from the target PC. UART runs at 115200 baud.
 
 ## Features
 
@@ -41,6 +41,8 @@ This project enables using a Bluetooth keyboard with PCs that don't have Bluetoo
 - **Persistent pairing**: Stores paired device info in NVS flash
 - **Pairing mode**: Long-press button (5 seconds) to pair new devices
 - **Key release safety**: Automatic key release on disconnect to prevent stuck keys
+- **RGB LED status**: Visual indication of connection state
+- **Auto PIN response**: Responds with "0000" when PIN is requested during pairing
 
 ## Operation
 
@@ -57,15 +59,15 @@ This project enables using a Bluetooth keyboard with PCs that don't have Bluetoo
 4. Once found, it connects and saves the new pairing
 5. Previous pairing is overwritten
 
-### States
-| State       | Description |
-|-------------|-------------|
-| IDLE        | Not scanning or connected |
-| SCANNING    | Searching for paired device |
-| CONNECTING  | Establishing connection |
-| CONNECTED   | Relaying keyboard input |
-| PAIRING     | Scanning for new devices |
-| ERROR       | Connection error (auto-retry) |
+### States & LED Indicators
+| State       | Description                   | LED Pattern                |
+|-------------|-------------------------------|----------------------------|
+| IDLE        | Not scanning or connected     | Slow red blink (1s)        |
+| SCANNING    | Searching for paired device   | Fast blue blink (200ms)    |
+| CONNECTING  | Establishing connection       | Slow green blink (1s)      |
+| CONNECTED   | Relaying keyboard input       | Solid green                |
+| PAIRING     | Scanning for new devices      | Blue/green alternating     |
+| ERROR       | Connection error (auto-retry) | Fast red blink (100ms)     |
 
 ## Building
 
@@ -92,12 +94,15 @@ idf.py -p /dev/ttyUSB0 monitor
 ### Pin Configuration (`main/config.h`)
 ```c
 // UART for CH9329
-#define CH9329_UART_TX_PIN      GPIO_NUM_26
-#define CH9329_UART_RX_PIN      GPIO_NUM_36
-#define CH9329_UART_BAUD_RATE   9600
+#define CH9329_UART_TX_PIN      GPIO_NUM_32
+#define CH9329_UART_RX_PIN      GPIO_NUM_33
+#define CH9329_UART_BAUD_RATE   115200
 
 // Button
 #define BUTTON_GPIO             GPIO_NUM_39
+
+// RGB LED (SK6812)
+#define RGB_LED_GPIO            GPIO_NUM_27
 
 // Timing
 #define BUTTON_LONG_PRESS_MS    5000   // Pairing mode trigger
@@ -106,7 +111,7 @@ idf.py -p /dev/ttyUSB0 monitor
 ```
 
 ### CH9329 Baud Rate
-The CH9329 defaults to 9600 baud. If your module is configured differently, update `CH9329_UART_BAUD_RATE` in `config.h`.
+The project is configured for 115200 baud. If your CH9329 module uses a different rate (default is 9600), update `CH9329_UART_BAUD_RATE` in `config.h` or reconfigure the CH9329 module.
 
 ## Project Structure
 
@@ -121,7 +126,8 @@ BT_HID_Proxy/
 │   ├── bt_hid_host.c/h     # Bluetooth HID Host module
 │   ├── ch9329.c/h          # CH9329 UART driver
 │   ├── storage.c/h         # NVS storage for pairing
-│   └── button.c/h          # Button input handler
+│   ├── button.c/h          # Button input handler
+│   └── led_status.c/h      # RGB LED status indicator
 └── README.md
 ```
 
@@ -178,7 +184,7 @@ To minimize latency:
 
 ## Future Improvements
 
-- [ ] RGB LED status indication
+- [x] RGB LED status indication
 - [ ] Multiple paired device storage
 - [ ] Media key support
 - [ ] Mouse input support

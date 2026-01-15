@@ -29,6 +29,7 @@
 #include "ch9329.h"
 #include "bt_hid_host.h"
 #include "button.h"
+#include "led_status.h"
 
 static const char *TAG = "MAIN";
 
@@ -70,27 +71,31 @@ static void on_bt_state_change(bt_hid_state_t state)
     switch (state) {
     case BT_HID_STATE_IDLE:
         ESP_LOGI(TAG, "BT: Idle");
+        led_status_set(LED_STATUS_IDLE);
         break;
     case BT_HID_STATE_SCANNING:
         ESP_LOGI(TAG, "BT: Scanning...");
+        led_status_set(LED_STATUS_SCANNING);
         break;
     case BT_HID_STATE_CONNECTING:
         ESP_LOGI(TAG, "BT: Connecting...");
+        led_status_set(LED_STATUS_CONNECTING);
         break;
     case BT_HID_STATE_CONNECTED:
         ESP_LOGI(TAG, "BT: Connected!");
+        led_status_set(LED_STATUS_CONNECTED);
         // Ensure keys are released on new connection
         ch9329_release_all_keys();
         break;
     case BT_HID_STATE_PAIRING:
         ESP_LOGI(TAG, "BT: Pairing mode");
+        led_status_set(LED_STATUS_PAIRING);
         break;
     case BT_HID_STATE_ERROR:
         ESP_LOGW(TAG, "BT: Error");
+        led_status_set(LED_STATUS_ERROR);
         break;
     }
-
-    // TODO: Update RGB LED based on state (future implementation)
 }
 
 /**
@@ -178,6 +183,14 @@ static esp_err_t init_all(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Button init failed: %s", esp_err_to_name(ret));
         return ret;
+    }
+
+    // 6. Initialize LED status indicator
+    ESP_LOGI(TAG, "Initializing LED status...");
+    ret = led_status_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "LED init failed (non-critical): %s", esp_err_to_name(ret));
+        // Continue without LED - not critical
     }
 
     ESP_LOGI(TAG, "========================================");
