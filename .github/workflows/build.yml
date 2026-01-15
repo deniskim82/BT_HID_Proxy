@@ -1,10 +1,6 @@
 name: ESP-IDF Build
 
 on:
-  push:
-    branches:
-      - main
-      - 'claude/**'
   pull_request:
     branches:
       - main
