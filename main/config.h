@@ -9,6 +9,13 @@
 #define CONFIG_H
 
 /* ============================================================================
+ * Debug Configuration
+ * ============================================================================ */
+
+// Set to 1 to enable verbose debug logging (affects performance)
+#define DEBUG_VERBOSE           0
+
+/* ============================================================================
  * Hardware Pin Configuration (M5Stamp Pico)
  * ============================================================================ */
 
@@ -57,7 +64,12 @@
 // Frame buffer size
 #define CH9329_FRAME_BUF_SIZE   64
 
-// Response timeout (milliseconds)
-#define CH9329_RESPONSE_TIMEOUT_MS  100
+// UART buffer sizes (TX larger for safety margin)
+#define CH9329_UART_TX_BUF_SIZE 512
+#define CH9329_UART_RX_BUF_SIZE 64
+
+// Pre-computed checksum base for keyboard frame header
+// Header: 0x57 + 0xAB + 0x00 + 0x02 + 0x08 = 0x0C
+#define CH9329_KB_HEADER_CHECKSUM_BASE  0x0C
 
 #endif /* CONFIG_H */
