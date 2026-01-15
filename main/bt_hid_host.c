@@ -217,7 +217,7 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
     switch (event) {
     case ESP_HIDH_OPEN_EVENT: {
         if (param->open.status == ESP_OK && param->open.dev != NULL) {
-            const esp_hidh_dev_t *dev = param->open.dev;
+            esp_hidh_dev_t *dev = param->open.dev;
             const uint8_t *addr = esp_hidh_dev_bda_get(dev);
 
             char addr_str[18];
