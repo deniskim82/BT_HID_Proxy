@@ -368,7 +368,7 @@ static void check_and_connect_device(const esp_bd_addr_t bd_addr, const char *na
         }
 
         set_state(BT_HID_STATE_CONNECTING);
-        esp_hidh_dev_open((esp_bd_addr_t)bd_addr, is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
+        esp_hidh_dev_open((uint8_t *)bd_addr, is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
         return;
     }
 
@@ -384,7 +384,7 @@ static void check_and_connect_device(const esp_bd_addr_t bd_addr, const char *na
         }
 
         set_state(BT_HID_STATE_CONNECTING);
-        esp_hidh_dev_open((esp_bd_addr_t)bd_addr, s_target_is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
+        esp_hidh_dev_open((uint8_t *)bd_addr, s_target_is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
     }
 }
 
