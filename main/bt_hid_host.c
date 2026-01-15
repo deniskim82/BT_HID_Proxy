@@ -368,7 +368,7 @@ static void check_and_connect_device(const esp_bd_addr_t bd_addr, const char *na
         }
 
         set_state(BT_HID_STATE_CONNECTING);
-        esp_hidh_dev_open(bd_addr, is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
+        esp_hidh_dev_open((esp_bd_addr_t)bd_addr, is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
         return;
     }
 
@@ -384,7 +384,7 @@ static void check_and_connect_device(const esp_bd_addr_t bd_addr, const char *na
         }
 
         set_state(BT_HID_STATE_CONNECTING);
-        esp_hidh_dev_open(bd_addr, s_target_is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
+        esp_hidh_dev_open((esp_bd_addr_t)bd_addr, s_target_is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
     }
 }
 
@@ -437,8 +437,8 @@ static void bt_gap_event_handler(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_para
         check_and_connect_device(
             param->disc_res.bda,
             name,
-            &param->disc_res.cod,
-            param->disc_res.rssi,
+            NULL,  // COD not directly available in v5.1.2+ (use properties if needed)
+            0,     // RSSI not directly available in v5.1.2+ (use properties if needed)
             false
         );
         break;
