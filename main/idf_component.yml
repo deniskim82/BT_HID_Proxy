@@ -1,0 +1,8 @@
+## IDF Component Manager Dependencies
+dependencies:
+  espressif/esp_driver_rmt:
+    version: "~1.0.0"
+    rules:
+      - if: "idf_version >= 5.0"
+  idf:
+    version: ">=5.0.0"

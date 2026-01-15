@@ -19,9 +19,10 @@ jobs:
       - name: ESP-IDF Build
         uses: espressif/esp-idf-ci-action@v1
         with:
-          esp_idf_version: v5.0
+          esp_idf_version: v5.1.2
           target: esp32
           path: '.'
+          command: idf.py build
 
       - name: Get build info
         id: build_info
