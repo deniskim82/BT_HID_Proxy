@@ -59,10 +59,26 @@ static bool s_pairing_mode = false;
 static TimerHandle_t s_reconnect_timer = NULL;
 static bool s_auto_reconnect = true;
 
-// Key release safety timer
+/*
+ * NOTE: Key release safety timer temporarily disabled for performance testing.
+ * If stuck key issues occur, uncomment this section and related code.
+ *
+ * The timer was designed to detect and release stuck keys when:
+ * - BT connection is lost without proper key release
+ * - Multi-paired keyboard switches to another device
+ *
+ * To re-enable:
+ * 1. Uncomment s_key_release_timer, s_last_keyboard_report, s_last_report_time
+ * 2. Uncomment key_release_timer_callback() function
+ * 3. Uncomment timer creation in bt_hid_host_init()
+ * 4. Uncomment timer cleanup in bt_hid_host_deinit()
+ * 5. Uncomment memcpy and esp_timer_get_time() in ESP_HIDH_INPUT_EVENT handler
+ */
+#if 0  // DISABLED: Key release safety timer
 static TimerHandle_t s_key_release_timer = NULL;
 static uint8_t s_last_keyboard_report[8] = {0};
 static int64_t s_last_report_time = 0;
+#endif
 
 /* ============================================================================
  * Private Functions - Forward Declarations
@@ -73,7 +89,6 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
 static void bt_gap_event_handler(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
 static void reconnect_timer_callback(TimerHandle_t timer);
-static void key_release_timer_callback(TimerHandle_t timer);
 static void send_key_release(void);
 
 /* ============================================================================
@@ -129,10 +144,18 @@ static void send_key_release(void)
     if (s_keyboard_cb) {
         s_keyboard_cb(empty_report);
     }
-
-    memset(s_last_keyboard_report, 0, sizeof(s_last_keyboard_report));
 }
 
+#if 0  // DISABLED: Key release timer callback
+/**
+ * @brief Timer callback to detect and release stuck keys
+ *
+ * This was designed to handle cases where:
+ * - BT disconnect doesn't properly release keys
+ * - Multi-paired keyboard causes phantom key holds
+ *
+ * If stuck key issues occur during testing, re-enable this feature.
+ */
 static void key_release_timer_callback(TimerHandle_t timer)
 {
     // If no key activity for KEY_RELEASE_TIMEOUT_MS and keys were pressed,
@@ -152,9 +175,11 @@ static void key_release_timer_callback(TimerHandle_t timer)
         if (has_keys) {
             ESP_LOGW(TAG, "Key release timeout - forcing release");
             send_key_release();
+            memset(s_last_keyboard_report, 0, sizeof(s_last_keyboard_report));
         }
     }
 }
+#endif
 
 /* ============================================================================
  * Private Functions - Reconnection
@@ -265,27 +290,41 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
                 if (param->input.length >= 8) {
                     const uint8_t *data = param->input.data;
 
-                    // Update last report and time
+                    /*
+                     * NOTE: Tracking code disabled for performance optimization.
+                     * This was used by the key release safety timer.
+                     * Re-enable if stuck key issues occur.
+                     */
+#if 0  // DISABLED: Key tracking for release timer
                     memcpy(s_last_keyboard_report, data, 8);
                     s_last_report_time = esp_timer_get_time();
+#endif
 
-                    // Forward to callback
+                    // Forward to callback (fast path - no extra processing)
                     if (s_keyboard_cb) {
                         s_keyboard_cb(data);
                     }
                 }
             }
-            // Note: Consumer/media keys could be handled here in the future
+#if DEBUG_VERBOSE
+            else {
+                ESP_LOGD(TAG, "HID usage: %d, len: %d", usage, param->input.length);
+            }
+#endif
         }
         break;
     }
 
     case ESP_HIDH_BATTERY_EVENT:
+#if DEBUG_VERBOSE
         ESP_LOGD(TAG, "Battery: %d%%", param->battery.level);
+#endif
         break;
 
     default:
+#if DEBUG_VERBOSE
         ESP_LOGD(TAG, "HID event: %d", event);
+#endif
         break;
     }
 }
@@ -538,6 +577,7 @@ esp_err_t bt_hid_host_init(bt_hid_keyboard_cb_t keyboard_cb, bt_hid_state_cb_t s
         reconnect_timer_callback
     );
 
+#if 0  // DISABLED: Key release safety timer
     // Create key release safety timer
     s_key_release_timer = xTimerCreate(
         "key_rel",
@@ -550,6 +590,7 @@ esp_err_t bt_hid_host_init(bt_hid_keyboard_cb_t keyboard_cb, bt_hid_state_cb_t s
     if (s_key_release_timer) {
         xTimerStart(s_key_release_timer, 0);
     }
+#endif
 
     s_initialized = true;
     set_state(BT_HID_STATE_IDLE);
@@ -578,11 +619,13 @@ void bt_hid_host_deinit(void)
         s_reconnect_timer = NULL;
     }
 
+#if 0  // DISABLED: Key release safety timer cleanup
     if (s_key_release_timer) {
         xTimerStop(s_key_release_timer, portMAX_DELAY);
         xTimerDelete(s_key_release_timer, portMAX_DELAY);
         s_key_release_timer = NULL;
     }
+#endif
 
     // Disconnect and send key release
     if (s_connected_dev) {
