@@ -67,9 +67,10 @@
 // Frame buffer size
 #define CH9329_FRAME_BUF_SIZE   64
 
-// UART buffer sizes (TX larger for safety margin)
+// ESP32 UART buffer sizes for CH9329 communication
+// Note: RX buffer must be > SOC_UART_FIFO_LEN (128 bytes on ESP32)
 #define CH9329_UART_TX_BUF_SIZE 512
-#define CH9329_UART_RX_BUF_SIZE 64
+#define CH9329_UART_RX_BUF_SIZE 256
 
 // Pre-computed checksum base for keyboard frame header
 // Header: 0x57 + 0xAB + 0x00 + 0x02 + 0x08 = 0x0C
