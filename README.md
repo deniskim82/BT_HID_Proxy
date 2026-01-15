@@ -1,5 +1,7 @@
 # BT_HID_Proxy
 
+![Build Status](https://github.com/deniskim82/BT_HID_Proxy/actions/workflows/build.yml/badge.svg)
+
 Bluetooth Keyboard to USB HID Proxy using ESP32 and CH9329.
 
 ## Overview
@@ -71,10 +73,25 @@ This project enables using a Bluetooth keyboard with PCs that don't have Bluetoo
 
 ## Building
 
-### Prerequisites
+### Option 1: Download Pre-built Binaries (Recommended)
+
+Pre-built firmware binaries are automatically generated for every commit via GitHub Actions:
+
+1. Go to the [Actions](https://github.com/deniskim82/BT_HID_Proxy/actions) tab
+2. Select the latest successful build
+3. Download the artifacts (contains `.bin` files and flash script)
+4. Extract and run the flash script:
+   ```bash
+   chmod +x flash.sh
+   ./flash.sh /dev/ttyUSB0
+   ```
+
+### Option 2: Build from Source
+
+#### Prerequisites
 - [ESP-IDF v5.0+](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/)
 
-### Build Commands
+#### Build Commands
 ```bash
 # Set target
 idf.py set-target esp32

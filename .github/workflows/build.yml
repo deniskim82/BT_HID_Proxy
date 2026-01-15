@@ -1,0 +1,203 @@
+name: ESP-IDF Build
+
+on:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build Firmware
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: ESP-IDF Build
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.0
+          target: esp32
+          path: '.'
+
+      - name: Get build info
+        id: build_info
+        run: |
+          # Get short commit SHA
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          # Get branch name
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "branch=${{ github.head_ref }}" >> $GITHUB_OUTPUT
+          else
+            echo "branch=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
+          fi
+          # Get build date
+          echo "date=$(date +'%Y%m%d_%H%M%S')" >> $GITHUB_OUTPUT
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts
+          cd build
+
+          # Copy binary files
+          cp bt_hid_proxy.bin ../artifacts/
+          cp bt_hid_proxy.elf ../artifacts/
+          cp bootloader/bootloader.bin ../artifacts/
+          cp partition_table/partition-table.bin ../artifacts/
+
+          # Create flash script
+          cat > ../artifacts/flash.sh << 'EOF'
+          #!/bin/bash
+          # Flash script for BT HID Proxy
+          # Usage: ./flash.sh /dev/ttyUSB0
+
+          PORT=${1:-/dev/ttyUSB0}
+
+          echo "Flashing BT HID Proxy to $PORT"
+          echo "================================"
+
+          # Check if esptool is installed
+          if ! command -v esptool.py &> /dev/null; then
+              echo "Error: esptool.py not found. Install it with:"
+              echo "  pip install esptool"
+              exit 1
+          fi
+
+          # Flash bootloader
+          echo "Flashing bootloader..."
+          esptool.py --chip esp32 --port $PORT --baud 460800 \
+              --before default_reset --after hard_reset write_flash \
+              -z --flash_mode dio --flash_freq 40m --flash_size detect \
+              0x1000 bootloader.bin
+
+          # Flash partition table
+          echo "Flashing partition table..."
+          esptool.py --chip esp32 --port $PORT --baud 460800 \
+              --before default_reset --after no_reset write_flash \
+              -z --flash_mode dio --flash_freq 40m --flash_size detect \
+              0x8000 partition-table.bin
+
+          # Flash application
+          echo "Flashing application..."
+          esptool.py --chip esp32 --port $PORT --baud 460800 \
+              --before default_reset --after hard_reset write_flash \
+              -z --flash_mode dio --flash_freq 40m --flash_size detect \
+              0x10000 bt_hid_proxy.bin
+
+          echo ""
+          echo "Flashing complete!"
+          echo ""
+          echo "To monitor serial output:"
+          echo "  screen $PORT 115200"
+          echo "  or"
+          echo "  idf.py -p $PORT monitor"
+          EOF
+
+          chmod +x ../artifacts/flash.sh
+
+          # Create README for artifacts
+          cat > ../artifacts/README.txt << EOF
+          BT HID Proxy - Firmware Build
+          ==============================
+
+          Build Information:
+          - Commit: ${{ steps.build_info.outputs.sha_short }}
+          - Branch: ${{ steps.build_info.outputs.branch }}
+          - Date: ${{ steps.build_info.outputs.date }}
+          - ESP-IDF: v5.0
+          - Target: ESP32 (M5Stamp Pico)
+
+          Files:
+          ------
+          - bt_hid_proxy.bin        : Main application binary
+          - bt_hid_proxy.elf        : ELF file with debug symbols
+          - bootloader.bin          : ESP32 bootloader
+          - partition-table.bin     : Partition table
+          - flash.sh                : Flash script (Linux/Mac)
+
+          Flashing Instructions:
+          ----------------------
+
+          Method 1: Using flash.sh (Recommended)
+
+            chmod +x flash.sh
+            ./flash.sh /dev/ttyUSB0
+
+          Method 2: Using esptool.py directly
+
+            esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 460800 \\
+              --before default_reset --after hard_reset write_flash -z \\
+              --flash_mode dio --flash_freq 40m --flash_size detect \\
+              0x1000 bootloader.bin \\
+              0x8000 partition-table.bin \\
+              0x10000 bt_hid_proxy.bin
+
+          Method 3: Using ESP-IDF (if you have the source code)
+
+            idf.py -p /dev/ttyUSB0 flash
+
+          Hardware Setup:
+          ---------------
+          - Target: M5Stamp Pico (ESP32-PICO-D4)
+          - CH9329 UART: GPIO32 (TX), GPIO33 (RX)
+          - Button: GPIO39
+          - RGB LED: GPIO27 (SK6812)
+
+          See main README.md for detailed hardware setup and usage instructions.
+
+          Troubleshooting:
+          ----------------
+          If flashing fails:
+          1. Check USB cable and port connection
+          2. Hold BOOT button (GPIO0) while connecting to enter download mode
+          3. Try lower baud rate: change 460800 to 115200
+          4. Verify driver installation (CP210x or CH340 depending on board)
+
+          For more information:
+          https://github.com/deniskim82/BT_HID_Proxy
+          EOF
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bt-hid-proxy-${{ steps.build_info.outputs.branch }}-${{ steps.build_info.outputs.sha_short }}
+          path: artifacts/
+          retention-days: 90
+
+      - name: Build Summary
+        run: |
+          echo "## Build Success! ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Firmware Information:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: \`${{ steps.build_info.outputs.sha_short }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: \`${{ steps.build_info.outputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Build Date: \`${{ steps.build_info.outputs.date }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Target: ESP32 (M5Stamp Pico)" >> $GITHUB_STEP_SUMMARY
+          echo "- ESP-IDF Version: v5.0" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Binary Sizes:**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -lh artifacts/*.bin | awk '{print $9, "-", $5}' >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Download Artifacts:**" >> $GITHUB_STEP_SUMMARY
+          echo "Firmware binaries are available in the 'Artifacts' section above." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Flash Instructions:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download and extract the artifact zip file" >> $GITHUB_STEP_SUMMARY
+          echo "2. Run \`./flash.sh /dev/ttyUSB0\` (Linux/Mac)" >> $GITHUB_STEP_SUMMARY
+          echo "3. Or use esptool.py manually (see README.txt in artifact)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Build failure notification
+        if: failure()
+        run: |
+          echo "## Build Failed ❌" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Please check the build logs above for error details." >> $GITHUB_STEP_SUMMARY
