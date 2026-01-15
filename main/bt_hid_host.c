@@ -217,7 +217,7 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
     switch (event) {
     case ESP_HIDH_OPEN_EVENT: {
         if (param->open.status == ESP_OK && param->open.dev != NULL) {
-            const esp_hidh_dev_t *dev = param->open.dev;
+            esp_hidh_dev_t *dev = param->open.dev;
             const uint8_t *addr = esp_hidh_dev_bda_get(dev);
 
             char addr_str[18];
@@ -368,7 +368,7 @@ static void check_and_connect_device(const esp_bd_addr_t bd_addr, const char *na
         }
 
         set_state(BT_HID_STATE_CONNECTING);
-        esp_hidh_dev_open(bd_addr, is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
+        esp_hidh_dev_open((uint8_t *)bd_addr, is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
         return;
     }
 
@@ -384,7 +384,7 @@ static void check_and_connect_device(const esp_bd_addr_t bd_addr, const char *na
         }
 
         set_state(BT_HID_STATE_CONNECTING);
-        esp_hidh_dev_open(bd_addr, s_target_is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
+        esp_hidh_dev_open((uint8_t *)bd_addr, s_target_is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
     }
 }
 
@@ -437,8 +437,8 @@ static void bt_gap_event_handler(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_para
         check_and_connect_device(
             param->disc_res.bda,
             name,
-            &param->disc_res.cod,
-            param->disc_res.rssi,
+            NULL,  // COD not directly available in v5.1.2+ (use properties if needed)
+            0,     // RSSI not directly available in v5.1.2+ (use properties if needed)
             false
         );
         break;
