@@ -173,7 +173,11 @@ bool storage_has_paired_device(void)
 
 void storage_bd_addr_to_str(const esp_bd_addr_t bd_addr, char *str)
 {
-    sprintf(str, "%02X:%02X:%02X:%02X:%02X:%02X",
+    if (str == NULL) {
+        return;
+    }
+
+    snprintf(str, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
             bd_addr[0], bd_addr[1], bd_addr[2],
             bd_addr[3], bd_addr[4], bd_addr[5]);
 }

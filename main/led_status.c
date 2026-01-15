@@ -192,7 +192,13 @@ static void set_led_color(uint8_t r, uint8_t g, uint8_t b)
     };
 
     rmt_transmit(s_rmt_channel, s_led_encoder, grb, sizeof(grb), &tx_config);
-    rmt_tx_wait_all_done(s_rmt_channel, portMAX_DELAY);
+
+    // Wait for transmission with timeout (100ms is more than enough for ~110us transmission)
+    esp_err_t ret = rmt_tx_wait_all_done(s_rmt_channel, pdMS_TO_TICKS(100));
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "LED transmission timeout or error: %s", esp_err_to_name(ret));
+        return;
+    }
 
     s_current_r = r;
     s_current_g = g;
