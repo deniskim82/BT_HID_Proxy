@@ -25,7 +25,9 @@
 #include "esp_bt_device.h"
 #include "esp_gap_bt_api.h"
 #include "esp_gap_ble_api.h"
+#include "esp_gattc_api.h"
 #include "esp_hidh.h"
+#include "esp_hidh_gattc.h"
 #include "esp_hid_common.h"
 
 static const char *TAG = "BT_HID";
@@ -500,40 +502,69 @@ esp_err_t bt_hid_host_init(bt_hid_keyboard_cb_t keyboard_cb, bt_hid_state_cb_t s
         return ESP_ERR_NO_MEM;
     }
 
+    ESP_LOGI(TAG, "Step 1: Releasing unused BT memory...");
     // Release BLE memory not needed (we need both Classic and BLE)
-    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_IDLE));
+    // Note: This may fail if already released, which is OK
+    esp_err_t mem_ret = esp_bt_controller_mem_release(ESP_BT_MODE_IDLE);
+    if (mem_ret != ESP_OK && mem_ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "Memory release returned: %s (continuing)", esp_err_to_name(mem_ret));
+    }
 
+    ESP_LOGI(TAG, "Step 2: Initializing BT controller...");
     // Initialize Bluetooth controller
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    // Explicitly set dual mode for ESP32 (both Classic BT and BLE)
+    bt_cfg.mode = ESP_BT_MODE_BTDM;
+    bt_cfg.bt_max_acl_conn = 3;
+    bt_cfg.bt_max_sync_conn = 3;
     esp_err_t ret = esp_bt_controller_init(&bt_cfg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "BT controller init failed: %s", esp_err_to_name(ret));
         goto cleanup;
     }
+    ESP_LOGI(TAG, "Step 2: BT controller init OK");
 
+    ESP_LOGI(TAG, "Step 3: Enabling BT controller (BTDM mode)...");
     ret = esp_bt_controller_enable(ESP_BT_MODE_BTDM);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "BT controller enable failed: %s", esp_err_to_name(ret));
         goto cleanup;
     }
+    ESP_LOGI(TAG, "Step 3: BT controller enable OK");
 
+    ESP_LOGI(TAG, "Step 4: Initializing Bluedroid...");
     // Initialize Bluedroid
     ret = esp_bluedroid_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Bluedroid init failed: %s", esp_err_to_name(ret));
         goto cleanup;
     }
+    ESP_LOGI(TAG, "Step 4: Bluedroid init OK");
 
+    ESP_LOGI(TAG, "Step 5: Enabling Bluedroid...");
     ret = esp_bluedroid_enable();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(ret));
         goto cleanup;
     }
+    ESP_LOGI(TAG, "Step 5: Bluedroid enable OK");
 
+    ESP_LOGI(TAG, "Step 6: Registering GAP callbacks...");
     // Register GAP callbacks
     esp_bt_gap_register_callback(bt_gap_event_handler);
     esp_ble_gap_register_callback(gap_event_handler);
+    ESP_LOGI(TAG, "Step 6: GAP callbacks registered");
 
+    ESP_LOGI(TAG, "Step 6a: Registering BLE GATTC callback...");
+    // Register GATTC callback for BLE HID support (REQUIRED for esp_hidh to work with BLE devices)
+    ret = esp_ble_gattc_register_callback(esp_hidh_gattc_event_handler);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "GATTC callback register failed: %s", esp_err_to_name(ret));
+        goto cleanup;
+    }
+    ESP_LOGI(TAG, "Step 6a: GATTC callback registered");
+
+    ESP_LOGI(TAG, "Step 7: Configuring Classic BT security...");
     // Configure Classic BT
     esp_bt_sp_param_t param_type = ESP_BT_SP_IOCAP_MODE;
     esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_NONE;  // No input/output for pairing
@@ -541,7 +572,9 @@ esp_err_t bt_hid_host_init(bt_hid_keyboard_cb_t keyboard_cb, bt_hid_state_cb_t s
 
     // Set scan mode (discoverable for pairing)
     esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+    ESP_LOGI(TAG, "Step 7: Classic BT security configured");
 
+    ESP_LOGI(TAG, "Step 8: Configuring BLE security...");
     // Configure BLE security
     esp_ble_auth_req_t auth_req = ESP_LE_AUTH_BOND;
     esp_ble_io_cap_t ble_iocap = ESP_IO_CAP_NONE;
@@ -554,7 +587,9 @@ esp_err_t bt_hid_host_init(bt_hid_keyboard_cb_t keyboard_cb, bt_hid_state_cb_t s
     esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
     esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
     esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(rsp_key));
+    ESP_LOGI(TAG, "Step 8: BLE security configured");
 
+    ESP_LOGI(TAG, "Step 9: Initializing HID Host...");
     // Initialize HID Host
     esp_hidh_config_t hidh_config = {
         .callback = hidh_callback,
@@ -567,7 +602,9 @@ esp_err_t bt_hid_host_init(bt_hid_keyboard_cb_t keyboard_cb, bt_hid_state_cb_t s
         ESP_LOGE(TAG, "HID Host init failed: %s", esp_err_to_name(ret));
         goto cleanup;
     }
+    ESP_LOGI(TAG, "Step 9: HID Host init OK");
 
+    ESP_LOGI(TAG, "Step 10: Creating reconnect timer...");
     // Create reconnect timer
     s_reconnect_timer = xTimerCreate(
         "bt_reconn",
@@ -576,6 +613,7 @@ esp_err_t bt_hid_host_init(bt_hid_keyboard_cb_t keyboard_cb, bt_hid_state_cb_t s
         NULL,
         reconnect_timer_callback
     );
+    ESP_LOGI(TAG, "Step 10: Reconnect timer created");
 
 #if 0  // DISABLED: Key release safety timer
     // Create key release safety timer
