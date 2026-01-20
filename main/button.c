@@ -90,10 +90,12 @@ esp_err_t button_init(button_callback_t callback)
     }
 
     // Configure GPIO
+    // Note: GPIO 34-39 are input-only and have no internal pull-up/pull-down.
+    // M5Stamp Pico has external pull-up on button GPIO.
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << BUTTON_GPIO),
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,   // Internal pull-up
+        .pull_up_en = GPIO_PULLUP_DISABLE,  // GPIO 39 has no internal pull-up
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,     // We use polling
     };
