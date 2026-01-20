@@ -825,10 +825,12 @@ static void bt_gap_event_handler(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_para
 
     case ESP_BT_GAP_PIN_REQ_EVT: {
         // Auto-respond with configured PIN code
+        esp_bt_pin_code_t pin = {0};
         const char *pin_str = BT_CLASSIC_PIN_CODE;
         uint8_t pin_len = strlen(pin_str);
+        memcpy(pin, pin_str, pin_len);
         ESP_LOGI(TAG, "Classic BT PIN requested - sending '%s'", pin_str);
-        esp_bt_gap_pin_reply(param->pin_req.bda, true, pin_len, (esp_bt_pin_code_t)pin_str);
+        esp_bt_gap_pin_reply(param->pin_req.bda, true, pin_len, pin);
         break;
     }
 
