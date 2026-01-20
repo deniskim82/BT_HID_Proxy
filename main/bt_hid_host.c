@@ -52,7 +52,11 @@ static bool s_connected_is_ble = false;
 // Target device for scanning
 static esp_bd_addr_t s_target_addr = {0};
 static bool s_target_is_ble = false;
+static uint8_t s_target_addr_type = 0;  // BLE address type for target
 static bool s_has_target = false;
+
+// Current connecting device info (for saving on successful connection)
+static uint8_t s_connecting_addr_type = 0;
 
 // Pairing mode flag
 static bool s_pairing_mode = false;
@@ -63,6 +67,7 @@ typedef struct {
     int rssi;
     bool is_ble;
     bool is_discoverable;  // Limited discoverable mode (pairing mode indicator)
+    uint8_t addr_type;     // BLE address type (BLE_ADDR_TYPE_PUBLIC/RANDOM)
     bool valid;
 } pairing_candidate_t;
 
@@ -110,7 +115,8 @@ static void bt_gap_event_handler(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_para
 static void reconnect_timer_callback(TimerHandle_t timer);
 static void connect_timeout_callback(TimerHandle_t timer);
 static void send_key_release(void);
-static void add_pairing_candidate(const esp_bd_addr_t bd_addr, int rssi, bool is_ble, bool is_discoverable);
+static void add_pairing_candidate(const esp_bd_addr_t bd_addr, int rssi, bool is_ble,
+                                   bool is_discoverable, uint8_t addr_type);
 static void select_and_connect_best_candidate(void);
 static void clear_pairing_candidates(void);
 
@@ -299,7 +305,8 @@ static void clear_pairing_candidates(void)
     s_candidate_count = 0;
 }
 
-static void add_pairing_candidate(const esp_bd_addr_t bd_addr, int rssi, bool is_ble, bool is_discoverable)
+static void add_pairing_candidate(const esp_bd_addr_t bd_addr, int rssi, bool is_ble,
+                                   bool is_discoverable, uint8_t addr_type)
 {
     // Check if device already in list
     for (int i = 0; i < s_candidate_count; i++) {
@@ -312,6 +319,8 @@ static void add_pairing_candidate(const esp_bd_addr_t bd_addr, int rssi, bool is
             if (is_discoverable) {
                 s_candidates[i].is_discoverable = true;
             }
+            // Update addr_type (BLE address type might change with RPA)
+            s_candidates[i].addr_type = addr_type;
             return;
         }
     }
@@ -322,13 +331,14 @@ static void add_pairing_candidate(const esp_bd_addr_t bd_addr, int rssi, bool is
         s_candidates[s_candidate_count].rssi = rssi;
         s_candidates[s_candidate_count].is_ble = is_ble;
         s_candidates[s_candidate_count].is_discoverable = is_discoverable;
+        s_candidates[s_candidate_count].addr_type = addr_type;
         s_candidates[s_candidate_count].valid = true;
         s_candidate_count++;
 
         char addr_str[18];
         storage_bd_addr_to_str(bd_addr, addr_str);
-        ESP_LOGI(TAG, "Candidate #%d: %s RSSI=%d BLE=%d Discoverable=%d",
-                 s_candidate_count, addr_str, rssi, is_ble, is_discoverable);
+        ESP_LOGI(TAG, "Candidate #%d: %s RSSI=%d BLE=%d Discoverable=%d AddrType=%d",
+                 s_candidate_count, addr_str, rssi, is_ble, is_discoverable, addr_type);
     } else {
         // Replace weakest signal candidate if this one is stronger
         int weakest_idx = 0;
@@ -344,6 +354,7 @@ static void add_pairing_candidate(const esp_bd_addr_t bd_addr, int rssi, bool is
             s_candidates[weakest_idx].rssi = rssi;
             s_candidates[weakest_idx].is_ble = is_ble;
             s_candidates[weakest_idx].is_discoverable = is_discoverable;
+            s_candidates[weakest_idx].addr_type = addr_type;
         }
     }
 }
@@ -411,10 +422,14 @@ static void select_and_connect_best_candidate(void)
         set_state(BT_HID_STATE_CONNECTING);
         start_connect_timeout();
 
-        ESP_LOGI(TAG, "Calling esp_hidh_dev_open() for %s (transport=%s)...",
-                 addr_str, best->is_ble ? "BLE" : "Classic BT");
+        // Save addr_type for updating target on successful connection
+        s_connecting_addr_type = best->addr_type;
+
+        ESP_LOGI(TAG, "Calling esp_hidh_dev_open() for %s (transport=%s, addr_type=%d)...",
+                 addr_str, best->is_ble ? "BLE" : "Classic BT", best->addr_type);
         esp_hidh_dev_t *dev = esp_hidh_dev_open((uint8_t *)best->bd_addr,
-                          best->is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
+                          best->is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT,
+                          best->addr_type);
         if (dev == NULL) {
             ESP_LOGE(TAG, "esp_hidh_dev_open() returned NULL - open failed immediately");
             stop_connect_timeout();
@@ -482,6 +497,7 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
                 // Update target
                 memcpy(s_target_addr, s_connected_addr, sizeof(esp_bd_addr_t));
                 s_target_is_ble = s_connected_is_ble;
+                s_target_addr_type = s_connecting_addr_type;  // Save BLE address type
                 s_has_target = true;
 
                 s_pairing_mode = false;
@@ -577,6 +593,14 @@ static void check_and_connect_device(const esp_bd_addr_t bd_addr, const char *na
     if (s_has_target && storage_bd_addr_equal(bd_addr, s_target_addr)) {
         ESP_LOGI(TAG, "Found target device %s", addr_str);
 
+        // Update target addr_type from scan result (BLE address type may change with RPA)
+        // For Classic BT, addr_type is ignored anyway
+        if (is_ble && cod == NULL) {
+            // BLE scan - addr_type is in scan result, but we don't have it here
+            // Will use stored s_target_addr_type which was saved from pairing
+            ESP_LOGI(TAG, "Using stored addr_type=%d for BLE target", s_target_addr_type);
+        }
+
         // Stop scan and connect
         if (is_ble) {
             esp_ble_gap_stop_scanning();
@@ -587,10 +611,14 @@ static void check_and_connect_device(const esp_bd_addr_t bd_addr, const char *na
         set_state(BT_HID_STATE_CONNECTING);
         start_connect_timeout();
 
-        ESP_LOGI(TAG, "Calling esp_hidh_dev_open() for target %s (transport=%s)...",
-                 addr_str, s_target_is_ble ? "BLE" : "Classic BT");
+        // Save for updating target on successful connection
+        s_connecting_addr_type = s_target_addr_type;
+
+        ESP_LOGI(TAG, "Calling esp_hidh_dev_open() for target %s (transport=%s, addr_type=%d)...",
+                 addr_str, s_target_is_ble ? "BLE" : "Classic BT", s_target_addr_type);
         esp_hidh_dev_t *dev = esp_hidh_dev_open((uint8_t *)bd_addr,
-                          s_target_is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
+                          s_target_is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT,
+                          s_target_addr_type);
         if (dev == NULL) {
             ESP_LOGE(TAG, "esp_hidh_dev_open() returned NULL - open failed immediately");
             stop_connect_timeout();
@@ -678,17 +706,24 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
                 bool is_discoverable = ble_is_limited_discoverable(
                     param->scan_rst.ble_adv, param->scan_rst.adv_data_len);
 
-                // Add to candidate list
+                // Add to candidate list with BLE address type
                 add_pairing_candidate(
                     param->scan_rst.bda,
                     param->scan_rst.rssi,
                     true,  // is_ble
-                    is_discoverable
+                    is_discoverable,
+                    param->scan_rst.ble_addr_type  // Use actual BLE address type from scan
                 );
                 return;
             }
 
             // Not pairing mode - check for target device
+            // Update target addr_type if this is our target (for reconnection)
+            if (s_has_target && storage_bd_addr_equal(param->scan_rst.bda, s_target_addr)) {
+                s_target_addr_type = param->scan_rst.ble_addr_type;
+                ESP_LOGI(TAG, "Updated target addr_type to %d from scan", s_target_addr_type);
+            }
+
             check_and_connect_device(
                 param->scan_rst.bda,
                 NULL,
@@ -823,7 +858,8 @@ static void bt_gap_event_handler(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_para
                 param->disc_res.bda,
                 rssi,
                 false,  // is_ble
-                true    // Classic BT in inquiry = discoverable
+                true,   // Classic BT in inquiry = discoverable
+                0       // addr_type not used for Classic BT
             );
             break;
         }
