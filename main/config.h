@@ -47,6 +47,11 @@
 // BT connection timeout (milliseconds)
 #define BT_CONNECT_TIMEOUT_MS   15000
 
+// RSSI threshold for pairing mode (-70 dBm = nearby device)
+// Lower values (e.g., -80) = farther devices allowed
+// Higher values (e.g., -50) = only very close devices
+#define BT_PAIRING_RSSI_THRESHOLD   -70
+
 // Connection retry delay (milliseconds)
 #define BT_RETRY_DELAY_MS       3000
 
