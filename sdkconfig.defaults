@@ -46,6 +46,10 @@ CONFIG_BT_BLE_SMP_ENABLE=y
 CONFIG_BT_GAP_ENABLED=y
 CONFIG_BT_GATTC_ENABLE=y
 
+# GATT Client - increase notification registration limit
+# Default is 5, but complex keyboards like Keychron K5 Max have 7+ input reports
+CONFIG_BT_GATTC_NOTIF_REG_MAX=15
+
 # HID configuration
 CONFIG_BT_HID_ENABLED=y
 
