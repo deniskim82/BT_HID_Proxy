@@ -44,6 +44,9 @@
 // BT scan timeout (seconds)
 #define BT_SCAN_TIMEOUT_SEC     10
 
+// BT connection timeout (milliseconds)
+#define BT_CONNECT_TIMEOUT_MS   15000
+
 // Connection retry delay (milliseconds)
 #define BT_RETRY_DELAY_MS       3000
 

@@ -61,6 +61,10 @@ static bool s_pairing_mode = false;
 static TimerHandle_t s_reconnect_timer = NULL;
 static bool s_auto_reconnect = true;
 
+// Connection timeout timer
+static TimerHandle_t s_connect_timeout_timer = NULL;
+static bool s_restart_pairing_after_timeout = false;
+
 /*
  * NOTE: Key release safety timer temporarily disabled for performance testing.
  * If stuck key issues occur, uncomment this section and related code.
@@ -91,6 +95,7 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
 static void bt_gap_event_handler(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
 static void reconnect_timer_callback(TimerHandle_t timer);
+static void connect_timeout_callback(TimerHandle_t timer);
 static void send_key_release(void);
 
 /* ============================================================================
@@ -189,6 +194,14 @@ static void key_release_timer_callback(TimerHandle_t timer)
 
 static void reconnect_timer_callback(TimerHandle_t timer)
 {
+    // Check if we need to restart pairing mode
+    if (s_restart_pairing_after_timeout) {
+        s_restart_pairing_after_timeout = false;
+        ESP_LOGI(TAG, "Restarting pairing mode after timeout");
+        bt_hid_host_start_pairing();
+        return;
+    }
+
     if (!s_auto_reconnect || !s_has_target) {
         return;
     }
@@ -197,6 +210,47 @@ static void reconnect_timer_callback(TimerHandle_t timer)
     if (state == BT_HID_STATE_IDLE || state == BT_HID_STATE_ERROR) {
         ESP_LOGI(TAG, "Auto-reconnect: starting scan");
         bt_hid_host_scan_for_device(s_target_addr, s_target_is_ble);
+    }
+}
+
+static void connect_timeout_callback(TimerHandle_t timer)
+{
+    bt_hid_state_t state = get_state();
+    if (state != BT_HID_STATE_CONNECTING) {
+        return;
+    }
+
+    ESP_LOGW(TAG, "Connection timeout - aborting");
+    bool was_pairing = s_pairing_mode;
+
+    // Reset state
+    s_pairing_mode = false;
+    set_state(BT_HID_STATE_IDLE);
+
+    // Schedule appropriate action via reconnect timer
+    if (was_pairing) {
+        ESP_LOGI(TAG, "Will restart pairing mode after delay");
+        s_restart_pairing_after_timeout = true;
+    }
+
+    // Use reconnect timer to schedule the next action
+    if (s_reconnect_timer) {
+        xTimerChangePeriod(s_reconnect_timer, pdMS_TO_TICKS(2000), 0);
+        xTimerStart(s_reconnect_timer, 0);
+    }
+}
+
+static void start_connect_timeout(void)
+{
+    if (s_connect_timeout_timer) {
+        xTimerStart(s_connect_timeout_timer, 0);
+    }
+}
+
+static void stop_connect_timeout(void)
+{
+    if (s_connect_timeout_timer) {
+        xTimerStop(s_connect_timeout_timer, 0);
     }
 }
 
@@ -218,6 +272,9 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
 
     switch (event) {
     case ESP_HIDH_OPEN_EVENT: {
+        // Stop connection timeout timer
+        stop_connect_timeout();
+
         if (param->open.status == ESP_OK && param->open.dev != NULL) {
             esp_hidh_dev_t *dev = param->open.dev;
             const uint8_t *addr = esp_hidh_dev_bda_get(dev);
@@ -370,6 +427,7 @@ static void check_and_connect_device(const esp_bd_addr_t bd_addr, const char *na
         }
 
         set_state(BT_HID_STATE_CONNECTING);
+        start_connect_timeout();
         esp_hidh_dev_open((uint8_t *)bd_addr, is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
         return;
     }
@@ -386,8 +444,47 @@ static void check_and_connect_device(const esp_bd_addr_t bd_addr, const char *na
         }
 
         set_state(BT_HID_STATE_CONNECTING);
+        start_connect_timeout();
         esp_hidh_dev_open((uint8_t *)bd_addr, s_target_is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
     }
+}
+
+// HID Service UUID for BLE (0x1812)
+static const uint16_t HID_SERVICE_UUID = 0x1812;
+
+static bool ble_has_hid_service(uint8_t *adv_data, uint8_t adv_data_len)
+{
+    if (adv_data == NULL || adv_data_len == 0) {
+        return false;
+    }
+
+    // Search for 16-bit service UUIDs in advertising data
+    uint8_t *uuid_data = NULL;
+    uint8_t uuid_len = 0;
+
+    // Try complete list of 16-bit UUIDs
+    uuid_data = esp_ble_resolve_adv_data(adv_data, ESP_BLE_AD_TYPE_16SRV_CMPL, &uuid_len);
+    if (uuid_data != NULL && uuid_len >= 2) {
+        for (int i = 0; i < uuid_len; i += 2) {
+            uint16_t uuid = (uuid_data[i + 1] << 8) | uuid_data[i];
+            if (uuid == HID_SERVICE_UUID) {
+                return true;
+            }
+        }
+    }
+
+    // Try incomplete list of 16-bit UUIDs
+    uuid_data = esp_ble_resolve_adv_data(adv_data, ESP_BLE_AD_TYPE_16SRV_PART, &uuid_len);
+    if (uuid_data != NULL && uuid_len >= 2) {
+        for (int i = 0; i < uuid_len; i += 2) {
+            uint16_t uuid = (uuid_data[i + 1] << 8) | uuid_data[i];
+            if (uuid == HID_SERVICE_UUID) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
@@ -395,7 +492,15 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     switch (event) {
     case ESP_GAP_BLE_SCAN_RESULT_EVT:
         if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_RES_EVT) {
-            // Found a BLE device
+            // In pairing mode, only connect to BLE devices advertising HID service
+            if (s_pairing_mode) {
+                if (!ble_has_hid_service(param->scan_rst.ble_adv, param->scan_rst.adv_data_len)) {
+                    // Not a HID device, skip
+                    return;
+                }
+            }
+
+            // Found a BLE device (with HID service if in pairing mode)
             check_and_connect_device(
                 param->scan_rst.bda,
                 NULL,  // Name not available in scan result
@@ -405,7 +510,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
             );
         } else if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_CMPL_EVT) {
             ESP_LOGI(TAG, "BLE scan complete");
-            if (get_state() == BT_HID_STATE_SCANNING) {
+            if (get_state() == BT_HID_STATE_SCANNING || get_state() == BT_HID_STATE_PAIRING) {
                 set_state(BT_HID_STATE_IDLE);
                 schedule_reconnect();
             }
@@ -423,24 +528,33 @@ static void bt_gap_event_handler(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_para
     case ESP_BT_GAP_DISC_RES_EVT: {
         // Found a Classic BT device
         char *name = NULL;
+        esp_bt_cod_t *cod = NULL;
 
-        // Extract device name from EIR
+        // Extract device properties
         for (int i = 0; i < param->disc_res.num_prop; i++) {
-            if (param->disc_res.prop[i].type == ESP_BT_GAP_DEV_PROP_EIR) {
+            switch (param->disc_res.prop[i].type) {
+            case ESP_BT_GAP_DEV_PROP_EIR: {
                 uint8_t *eir = param->disc_res.prop[i].val;
                 uint8_t len;
                 name = (char *)esp_bt_gap_resolve_eir_data(eir, ESP_BT_EIR_TYPE_CMPL_LOCAL_NAME, &len);
                 if (!name) {
                     name = (char *)esp_bt_gap_resolve_eir_data(eir, ESP_BT_EIR_TYPE_SHORT_LOCAL_NAME, &len);
                 }
+                break;
+            }
+            case ESP_BT_GAP_DEV_PROP_COD:
+                cod = (esp_bt_cod_t *)param->disc_res.prop[i].val;
+                break;
+            default:
+                break;
             }
         }
 
         check_and_connect_device(
             param->disc_res.bda,
             name,
-            NULL,  // COD not directly available in v5.1.2+ (use properties if needed)
-            0,     // RSSI not directly available in v5.1.2+ (use properties if needed)
+            cod,
+            0,
             false
         );
         break;
@@ -604,7 +718,7 @@ esp_err_t bt_hid_host_init(bt_hid_keyboard_cb_t keyboard_cb, bt_hid_state_cb_t s
     }
     ESP_LOGI(TAG, "Step 9: HID Host init OK");
 
-    ESP_LOGI(TAG, "Step 10: Creating reconnect timer...");
+    ESP_LOGI(TAG, "Step 10: Creating timers...");
     // Create reconnect timer
     s_reconnect_timer = xTimerCreate(
         "bt_reconn",
@@ -613,7 +727,16 @@ esp_err_t bt_hid_host_init(bt_hid_keyboard_cb_t keyboard_cb, bt_hid_state_cb_t s
         NULL,
         reconnect_timer_callback
     );
-    ESP_LOGI(TAG, "Step 10: Reconnect timer created");
+
+    // Create connection timeout timer
+    s_connect_timeout_timer = xTimerCreate(
+        "bt_conn_to",
+        pdMS_TO_TICKS(BT_CONNECT_TIMEOUT_MS),
+        pdFALSE,  // One-shot
+        NULL,
+        connect_timeout_callback
+    );
+    ESP_LOGI(TAG, "Step 10: Timers created");
 
 #if 0  // DISABLED: Key release safety timer
     // Create key release safety timer
@@ -655,6 +778,12 @@ void bt_hid_host_deinit(void)
         xTimerStop(s_reconnect_timer, portMAX_DELAY);
         xTimerDelete(s_reconnect_timer, portMAX_DELAY);
         s_reconnect_timer = NULL;
+    }
+
+    if (s_connect_timeout_timer) {
+        xTimerStop(s_connect_timeout_timer, portMAX_DELAY);
+        xTimerDelete(s_connect_timeout_timer, portMAX_DELAY);
+        s_connect_timeout_timer = NULL;
     }
 
 #if 0  // DISABLED: Key release safety timer cleanup
