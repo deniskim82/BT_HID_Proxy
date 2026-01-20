@@ -671,6 +671,50 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
         }
         break;
 
+    // ========== BLE Security/Pairing Events ==========
+
+    case ESP_GAP_BLE_SEC_REQ_EVT:
+        // Peer device requests security/pairing - accept it
+        ESP_LOGI(TAG, "BLE security request from peer - accepting");
+        esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+        break;
+
+    case ESP_GAP_BLE_AUTH_CMPL_EVT:
+        // Authentication (pairing) complete
+        if (param->ble_security.auth_cmpl.success) {
+            ESP_LOGI(TAG, "BLE pairing success, addr_type=%d, auth_mode=%d",
+                     param->ble_security.auth_cmpl.addr_type,
+                     param->ble_security.auth_cmpl.auth_mode);
+        } else {
+            ESP_LOGW(TAG, "BLE pairing failed, reason=0x%x",
+                     param->ble_security.auth_cmpl.fail_reason);
+        }
+        break;
+
+    case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:
+        // Display passkey to user (for keyboards that show passkey)
+        ESP_LOGI(TAG, "BLE Passkey: %06lu (enter this on keyboard if prompted)",
+                 (unsigned long)param->ble_security.key_notif.passkey);
+        break;
+
+    case ESP_GAP_BLE_NC_REQ_EVT:
+        // Numeric comparison - auto-accept for headless device
+        ESP_LOGI(TAG, "BLE Numeric comparison: %06lu - auto-accepting",
+                 (unsigned long)param->ble_security.key_notif.passkey);
+        esp_ble_confirm_reply(param->ble_security.key_notif.bd_addr, true);
+        break;
+
+    case ESP_GAP_BLE_PASSKEY_REQ_EVT:
+        // Passkey entry requested - use default 0 for headless device
+        ESP_LOGI(TAG, "BLE Passkey entry requested - sending 000000");
+        esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, true, 0);
+        break;
+
+    case ESP_GAP_BLE_KEY_EVT:
+        // Key exchange event - just log it
+        ESP_LOGD(TAG, "BLE key exchange, key_type=%d", param->ble_security.ble_key.key_type);
+        break;
+
     default:
         break;
     }
