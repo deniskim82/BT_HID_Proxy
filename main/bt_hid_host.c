@@ -692,9 +692,15 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
         break;
 
     case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:
-        // Display passkey to user (for keyboards that show passkey)
-        ESP_LOGI(TAG, "BLE Passkey: %06lu (enter this on keyboard if prompted)",
+        // Display passkey for keyboard entry
+        // With static passkey configured, this should always show the same value
+#if BT_BLE_STATIC_PASSKEY > 0
+        ESP_LOGI(TAG, "BLE Passkey: %06d - Enter this on keyboard then press Enter",
+                 BT_BLE_STATIC_PASSKEY);
+#else
+        ESP_LOGI(TAG, "BLE Passkey: %06lu - Enter this on keyboard then press Enter",
                  (unsigned long)param->ble_security.key_notif.passkey);
+#endif
         break;
 
     case ESP_GAP_BLE_NC_REQ_EVT:
@@ -817,12 +823,14 @@ static void bt_gap_event_handler(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_para
         }
         break;
 
-    case ESP_BT_GAP_PIN_REQ_EVT:
-        // Auto-respond with default PIN "0000"
-        ESP_LOGI(TAG, "PIN requested, sending default");
-        esp_bt_pin_code_t pin = {'0', '0', '0', '0'};
-        esp_bt_gap_pin_reply(param->pin_req.bda, true, 4, pin);
+    case ESP_BT_GAP_PIN_REQ_EVT: {
+        // Auto-respond with configured PIN code
+        const char *pin_str = BT_CLASSIC_PIN_CODE;
+        uint8_t pin_len = strlen(pin_str);
+        ESP_LOGI(TAG, "Classic BT PIN requested - sending '%s'", pin_str);
+        esp_bt_gap_pin_reply(param->pin_req.bda, true, pin_len, (esp_bt_pin_code_t)pin_str);
         break;
+    }
 
     default:
         break;
@@ -940,7 +948,16 @@ esp_err_t bt_hid_host_init(bt_hid_keyboard_cb_t keyboard_cb, bt_hid_state_cb_t s
     esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
     esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
     esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(rsp_key));
-    ESP_LOGI(TAG, "Step 8: BLE security configured");
+
+    // Set static passkey for headless operation
+    // When pairing, user enters this code on the keyboard
+#if BT_BLE_STATIC_PASSKEY > 0
+    uint32_t passkey = BT_BLE_STATIC_PASSKEY;
+    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_STATIC_PASSKEY, &passkey, sizeof(passkey));
+    ESP_LOGI(TAG, "Step 8: BLE security configured (static passkey: %06lu)", (unsigned long)passkey);
+#else
+    ESP_LOGI(TAG, "Step 8: BLE security configured (random passkey)");
+#endif
 
     ESP_LOGI(TAG, "Step 9: Initializing HID Host...");
     // Initialize HID Host
