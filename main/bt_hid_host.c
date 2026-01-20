@@ -231,12 +231,17 @@ static void reconnect_timer_callback(TimerHandle_t timer)
 
 static void connect_timeout_callback(TimerHandle_t timer)
 {
+    ESP_LOGW(TAG, ">>> CONNECTION TIMEOUT FIRED <<<");
+
     bt_hid_state_t state = get_state();
+    ESP_LOGW(TAG, "Current state: %d (CONNECTING=%d)", state, BT_HID_STATE_CONNECTING);
+
     if (state != BT_HID_STATE_CONNECTING) {
+        ESP_LOGW(TAG, "Ignoring timeout - not in CONNECTING state");
         return;
     }
 
-    ESP_LOGW(TAG, "Connection timeout - aborting");
+    ESP_LOGW(TAG, "Connection timeout - aborting connection attempt");
     bool was_pairing = s_pairing_mode;
 
     // Reset state
@@ -259,13 +264,20 @@ static void connect_timeout_callback(TimerHandle_t timer)
 static void start_connect_timeout(void)
 {
     if (s_connect_timeout_timer) {
-        xTimerStart(s_connect_timeout_timer, 0);
+        ESP_LOGI(TAG, "Starting connection timeout timer (%d ms)", BT_CONNECT_TIMEOUT_MS);
+        BaseType_t result = xTimerStart(s_connect_timeout_timer, 0);
+        if (result != pdPASS) {
+            ESP_LOGE(TAG, "Failed to start timeout timer!");
+        }
+    } else {
+        ESP_LOGE(TAG, "Timeout timer is NULL!");
     }
 }
 
 static void stop_connect_timeout(void)
 {
     if (s_connect_timeout_timer) {
+        ESP_LOGI(TAG, "Stopping connection timeout timer");
         xTimerStop(s_connect_timeout_timer, 0);
     }
 }
@@ -398,8 +410,24 @@ static void select_and_connect_best_candidate(void)
 
         set_state(BT_HID_STATE_CONNECTING);
         start_connect_timeout();
-        esp_hidh_dev_open((uint8_t *)best->bd_addr,
+
+        ESP_LOGI(TAG, "Calling esp_hidh_dev_open() for %s (transport=%s)...",
+                 addr_str, best->is_ble ? "BLE" : "Classic BT");
+        esp_err_t ret = esp_hidh_dev_open((uint8_t *)best->bd_addr,
                           best->is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "esp_hidh_dev_open() FAILED: %s (0x%x)", esp_err_to_name(ret), ret);
+            stop_connect_timeout();
+            set_state(BT_HID_STATE_ERROR);
+            // Retry pairing after delay
+            s_restart_pairing_after_timeout = true;
+            if (s_reconnect_timer) {
+                xTimerChangePeriod(s_reconnect_timer, pdMS_TO_TICKS(2000), 0);
+                xTimerStart(s_reconnect_timer, 0);
+            }
+        } else {
+            ESP_LOGI(TAG, "esp_hidh_dev_open() returned ESP_OK, waiting for OPEN event...");
+        }
     }
 
     clear_pairing_candidates();
@@ -558,7 +586,19 @@ static void check_and_connect_device(const esp_bd_addr_t bd_addr, const char *na
 
         set_state(BT_HID_STATE_CONNECTING);
         start_connect_timeout();
-        esp_hidh_dev_open((uint8_t *)bd_addr, s_target_is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
+
+        ESP_LOGI(TAG, "Calling esp_hidh_dev_open() for target %s (transport=%s)...",
+                 addr_str, s_target_is_ble ? "BLE" : "Classic BT");
+        esp_err_t ret = esp_hidh_dev_open((uint8_t *)bd_addr,
+                          s_target_is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "esp_hidh_dev_open() FAILED: %s (0x%x)", esp_err_to_name(ret), ret);
+            stop_connect_timeout();
+            set_state(BT_HID_STATE_ERROR);
+            schedule_reconnect();
+        } else {
+            ESP_LOGI(TAG, "esp_hidh_dev_open() returned ESP_OK, waiting for OPEN event...");
+        }
     }
 }
 
@@ -1143,8 +1183,23 @@ esp_err_t bt_hid_host_start_pairing(void)
     bt_hid_state_t state = get_state();
     if (state == BT_HID_STATE_CONNECTED) {
         // Disconnect current device first
+        ESP_LOGI(TAG, "Disconnecting current device before pairing...");
         bt_hid_host_disconnect();
         vTaskDelay(pdMS_TO_TICKS(500));
+    } else if (state == BT_HID_STATE_CONNECTING) {
+        // Already attempting to connect - abort to restart pairing
+        ESP_LOGW(TAG, "Already connecting - aborting to restart pairing");
+        stop_connect_timeout();
+        // Note: We can't cancel esp_hidh_dev_open(), but stopping scan/discovery
+        // and resetting state should help
+        esp_ble_gap_stop_scanning();
+        esp_bt_gap_cancel_discovery();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    } else if (state == BT_HID_STATE_PAIRING) {
+        ESP_LOGW(TAG, "Already in pairing mode - restarting scan");
+        esp_ble_gap_stop_scanning();
+        esp_bt_gap_cancel_discovery();
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     ESP_LOGI(TAG, "Entering pairing mode");
