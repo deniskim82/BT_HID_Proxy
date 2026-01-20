@@ -252,7 +252,19 @@ static esp_hid_scan_result_t *find_best_device(esp_hid_scan_result_t *results,
 
         if (pairing_mode) {
             // Pairing mode: prefer keyboards with strongest signal
-            if (r->usage == ESP_HID_USAGE_KEYBOARD) {
+            bool is_keyboard = (r->usage == ESP_HID_USAGE_KEYBOARD);
+
+            // Also check BLE appearance directly (0x03C0-0x03C3 = keyboard)
+            // because esp_hid_usage_from_appearance() may not work correctly in v5.1.2
+            if (r->transport == ESP_HID_TRANSPORT_BLE) {
+                uint16_t appearance = r->ble.appearance;
+                if (appearance >= 0x03C0 && appearance <= 0x03C3) {
+                    is_keyboard = true;
+                    ESP_LOGI(TAG, "  -> Keyboard detected by appearance (0x%04x)", appearance);
+                }
+            }
+
+            if (is_keyboard) {
                 if (best == NULL || r->rssi > best->rssi) {
                     best = r;
                 }
