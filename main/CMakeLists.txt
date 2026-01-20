@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.c"
         "bt_hid_host.c"
+        "esp_hid_gap.c"
         "ch9329.c"
         "storage.c"
         "button.c"
