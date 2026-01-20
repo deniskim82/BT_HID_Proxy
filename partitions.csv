@@ -1,0 +1,12 @@
+# BT_HID_Proxy Partition Table
+# Optimized for M5Stamp Pico (ESP32-PICO-D4, 4MB Flash)
+#
+# Name,   Type, SubType, Offset,  Size,     Flags
+# NVS partition for WiFi/BT credentials
+nvs,      data, nvs,     0x9000,  0x6000,
+# PHY init data
+phy_init, data, phy,     0xf000,  0x1000,
+# Factory app partition (1.5 MB - enough for debug builds)
+factory,  app,  factory, 0x10000, 0x180000,
+# Storage partition for paired device info (optional, can expand if needed)
+storage,  data, fat,     0x190000, 0x10000,

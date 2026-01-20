@@ -413,10 +413,10 @@ static void select_and_connect_best_candidate(void)
 
         ESP_LOGI(TAG, "Calling esp_hidh_dev_open() for %s (transport=%s)...",
                  addr_str, best->is_ble ? "BLE" : "Classic BT");
-        esp_err_t ret = esp_hidh_dev_open((uint8_t *)best->bd_addr,
+        esp_hidh_dev_t *dev = esp_hidh_dev_open((uint8_t *)best->bd_addr,
                           best->is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "esp_hidh_dev_open() FAILED: %s (0x%x)", esp_err_to_name(ret), ret);
+        if (dev == NULL) {
+            ESP_LOGE(TAG, "esp_hidh_dev_open() returned NULL - open failed immediately");
             stop_connect_timeout();
             set_state(BT_HID_STATE_ERROR);
             // Retry pairing after delay
@@ -426,7 +426,7 @@ static void select_and_connect_best_candidate(void)
                 xTimerStart(s_reconnect_timer, 0);
             }
         } else {
-            ESP_LOGI(TAG, "esp_hidh_dev_open() returned ESP_OK, waiting for OPEN event...");
+            ESP_LOGI(TAG, "esp_hidh_dev_open() initiated (dev=%p), waiting for OPEN event...", dev);
         }
     }
 
@@ -589,15 +589,15 @@ static void check_and_connect_device(const esp_bd_addr_t bd_addr, const char *na
 
         ESP_LOGI(TAG, "Calling esp_hidh_dev_open() for target %s (transport=%s)...",
                  addr_str, s_target_is_ble ? "BLE" : "Classic BT");
-        esp_err_t ret = esp_hidh_dev_open((uint8_t *)bd_addr,
+        esp_hidh_dev_t *dev = esp_hidh_dev_open((uint8_t *)bd_addr,
                           s_target_is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "esp_hidh_dev_open() FAILED: %s (0x%x)", esp_err_to_name(ret), ret);
+        if (dev == NULL) {
+            ESP_LOGE(TAG, "esp_hidh_dev_open() returned NULL - open failed immediately");
             stop_connect_timeout();
             set_state(BT_HID_STATE_ERROR);
             schedule_reconnect();
         } else {
-            ESP_LOGI(TAG, "esp_hidh_dev_open() returned ESP_OK, waiting for OPEN event...");
+            ESP_LOGI(TAG, "esp_hidh_dev_open() initiated (dev=%p), waiting for OPEN event...", dev);
         }
     }
 }
