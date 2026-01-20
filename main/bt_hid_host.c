@@ -191,14 +191,23 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
     }
 
     case ESP_HIDH_INPUT_EVENT: {
-        // Process HID input report
-        esp_hid_usage_t usage = param->input.usage;
+        // Log all input events for debugging
+        ESP_LOGI(TAG, "INPUT: usage=%s map=%u id=%u len=%d",
+                 esp_hid_usage_str(param->input.usage),
+                 param->input.map_index,
+                 param->input.report_id,
+                 param->input.length);
+        ESP_LOG_BUFFER_HEX(TAG, param->input.data, param->input.length);
 
-        if (usage == ESP_HID_USAGE_KEYBOARD && param->input.length >= 8) {
-            // Keyboard report - forward to callback
-            if (s_keyboard_cb) {
-                s_keyboard_cb(param->input.data);
-            }
+        // Process HID input report
+        // Standard keyboard report: 8 bytes (modifier, reserved, 6 keycodes)
+        // Accept if usage is KEYBOARD or if it looks like a keyboard report (8 bytes)
+        esp_hid_usage_t usage = param->input.usage;
+        bool is_keyboard_report = (usage == ESP_HID_USAGE_KEYBOARD) ||
+                                   (param->input.length == 8);
+
+        if (is_keyboard_report && s_keyboard_cb) {
+            s_keyboard_cb(param->input.data);
         }
         break;
     }
