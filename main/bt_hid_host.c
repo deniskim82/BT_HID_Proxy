@@ -219,8 +219,9 @@ static void reconnect_timer_callback(TimerHandle_t timer)
     // Check if we need to restart pairing mode
     if (s_restart_pairing_after_timeout) {
         s_restart_pairing_after_timeout = false;
-        ESP_LOGI(TAG, "Restarting pairing mode after timeout");
-        bt_hid_host_start_pairing();
+        // FIXME: Cannot call bt_hid_host_start_pairing() from timer context (stack overflow)
+        // User must manually press button to restart pairing
+        ESP_LOGW(TAG, "Pairing timeout - please press button to restart pairing mode");
         return;
     }
 
@@ -231,7 +232,10 @@ static void reconnect_timer_callback(TimerHandle_t timer)
     bt_hid_state_t state = get_state();
     if (state == BT_HID_STATE_IDLE || state == BT_HID_STATE_ERROR) {
         ESP_LOGI(TAG, "Auto-reconnect: starting scan");
-        bt_hid_host_scan_for_device(s_target_addr, s_target_is_ble);
+        // FIXME: bt_hid_host_scan_for_device() also calls heavy BT APIs from timer context
+        // This may cause stack overflow. Need to offload to dedicated task.
+        ESP_LOGW(TAG, "Auto-reconnect disabled (would cause stack overflow)");
+        // bt_hid_host_scan_for_device(s_target_addr, s_target_is_ble);
     }
 }
 
@@ -425,11 +429,16 @@ static void select_and_connect_best_candidate(void)
         // Save addr_type for updating target on successful connection
         s_connecting_addr_type = best->addr_type;
 
+        ESP_LOGI(TAG, ">>> BEFORE esp_hidh_dev_open() call <<<");
         ESP_LOGI(TAG, "Calling esp_hidh_dev_open() for %s (transport=%s, addr_type=%d)...",
                  addr_str, best->is_ble ? "BLE" : "Classic BT", best->addr_type);
+
         esp_hidh_dev_t *dev = esp_hidh_dev_open((uint8_t *)best->bd_addr,
                           best->is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT,
                           best->addr_type);
+
+        ESP_LOGI(TAG, ">>> AFTER esp_hidh_dev_open() call, dev=%p <<<", dev);
+
         if (dev == NULL) {
             ESP_LOGE(TAG, "esp_hidh_dev_open() returned NULL - open failed immediately");
             stop_connect_timeout();
@@ -441,7 +450,7 @@ static void select_and_connect_best_candidate(void)
                 xTimerStart(s_reconnect_timer, 0);
             }
         } else {
-            ESP_LOGI(TAG, "esp_hidh_dev_open() initiated (dev=%p), waiting for OPEN event...", dev);
+            ESP_LOGI(TAG, "esp_hidh_dev_open() initiated successfully (dev=%p), waiting for OPEN event...", dev);
         }
     }
 
