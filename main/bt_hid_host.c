@@ -57,6 +57,19 @@ static bool s_has_target = false;
 // Pairing mode flag
 static bool s_pairing_mode = false;
 
+// Discovered device candidate for pairing
+typedef struct {
+    esp_bd_addr_t bd_addr;
+    int rssi;
+    bool is_ble;
+    bool is_discoverable;  // Limited discoverable mode (pairing mode indicator)
+    bool valid;
+} pairing_candidate_t;
+
+#define MAX_PAIRING_CANDIDATES 5
+static pairing_candidate_t s_candidates[MAX_PAIRING_CANDIDATES];
+static int s_candidate_count = 0;
+
 // Auto-reconnect timer
 static TimerHandle_t s_reconnect_timer = NULL;
 static bool s_auto_reconnect = true;
@@ -97,6 +110,9 @@ static void bt_gap_event_handler(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_para
 static void reconnect_timer_callback(TimerHandle_t timer);
 static void connect_timeout_callback(TimerHandle_t timer);
 static void send_key_release(void);
+static void add_pairing_candidate(const esp_bd_addr_t bd_addr, int rssi, bool is_ble, bool is_discoverable);
+static void select_and_connect_best_candidate(void);
+static void clear_pairing_candidates(void);
 
 /* ============================================================================
  * Private Functions - State Management
@@ -262,6 +278,134 @@ static void schedule_reconnect(void)
 }
 
 /* ============================================================================
+ * Private Functions - Pairing Candidate Management
+ * ============================================================================ */
+
+static void clear_pairing_candidates(void)
+{
+    memset(s_candidates, 0, sizeof(s_candidates));
+    s_candidate_count = 0;
+}
+
+static void add_pairing_candidate(const esp_bd_addr_t bd_addr, int rssi, bool is_ble, bool is_discoverable)
+{
+    // Check if device already in list
+    for (int i = 0; i < s_candidate_count; i++) {
+        if (storage_bd_addr_equal(bd_addr, s_candidates[i].bd_addr)) {
+            // Update RSSI if stronger
+            if (rssi > s_candidates[i].rssi) {
+                s_candidates[i].rssi = rssi;
+            }
+            // Update discoverable flag if now discoverable
+            if (is_discoverable) {
+                s_candidates[i].is_discoverable = true;
+            }
+            return;
+        }
+    }
+
+    // Add new candidate if space available
+    if (s_candidate_count < MAX_PAIRING_CANDIDATES) {
+        memcpy(s_candidates[s_candidate_count].bd_addr, bd_addr, sizeof(esp_bd_addr_t));
+        s_candidates[s_candidate_count].rssi = rssi;
+        s_candidates[s_candidate_count].is_ble = is_ble;
+        s_candidates[s_candidate_count].is_discoverable = is_discoverable;
+        s_candidates[s_candidate_count].valid = true;
+        s_candidate_count++;
+
+        char addr_str[18];
+        storage_bd_addr_to_str(bd_addr, addr_str);
+        ESP_LOGI(TAG, "Candidate #%d: %s RSSI=%d BLE=%d Discoverable=%d",
+                 s_candidate_count, addr_str, rssi, is_ble, is_discoverable);
+    } else {
+        // Replace weakest signal candidate if this one is stronger
+        int weakest_idx = 0;
+        int weakest_rssi = s_candidates[0].rssi;
+        for (int i = 1; i < MAX_PAIRING_CANDIDATES; i++) {
+            if (s_candidates[i].rssi < weakest_rssi) {
+                weakest_rssi = s_candidates[i].rssi;
+                weakest_idx = i;
+            }
+        }
+        if (rssi > weakest_rssi) {
+            memcpy(s_candidates[weakest_idx].bd_addr, bd_addr, sizeof(esp_bd_addr_t));
+            s_candidates[weakest_idx].rssi = rssi;
+            s_candidates[weakest_idx].is_ble = is_ble;
+            s_candidates[weakest_idx].is_discoverable = is_discoverable;
+        }
+    }
+}
+
+static void select_and_connect_best_candidate(void)
+{
+    if (s_candidate_count == 0) {
+        ESP_LOGW(TAG, "No pairing candidates found");
+        set_state(BT_HID_STATE_IDLE);
+        // Restart pairing scan after delay
+        s_restart_pairing_after_timeout = true;
+        if (s_reconnect_timer) {
+            xTimerChangePeriod(s_reconnect_timer, pdMS_TO_TICKS(2000), 0);
+            xTimerStart(s_reconnect_timer, 0);
+        }
+        return;
+    }
+
+    // Selection priority:
+    // 1. Discoverable mode devices (in pairing mode) with RSSI above threshold
+    // 2. Any device with RSSI above threshold
+    // 3. Strongest signal device
+
+    pairing_candidate_t *best = NULL;
+    int best_score = -1000;  // Lower than any RSSI
+
+    for (int i = 0; i < s_candidate_count; i++) {
+        if (!s_candidates[i].valid) continue;
+
+        int score = s_candidates[i].rssi;
+
+        // Bonus for discoverable mode (likely in pairing mode)
+        if (s_candidates[i].is_discoverable) {
+            score += 30;  // +30dB equivalent bonus
+        }
+
+        // Only consider devices above RSSI threshold, unless discoverable
+        if (s_candidates[i].rssi < BT_PAIRING_RSSI_THRESHOLD && !s_candidates[i].is_discoverable) {
+            continue;
+        }
+
+        if (score > best_score) {
+            best_score = score;
+            best = &s_candidates[i];
+        }
+    }
+
+    // Fallback: if no device passed threshold, pick strongest
+    if (best == NULL) {
+        int strongest_rssi = -1000;
+        for (int i = 0; i < s_candidate_count; i++) {
+            if (s_candidates[i].valid && s_candidates[i].rssi > strongest_rssi) {
+                strongest_rssi = s_candidates[i].rssi;
+                best = &s_candidates[i];
+            }
+        }
+    }
+
+    if (best != NULL) {
+        char addr_str[18];
+        storage_bd_addr_to_str(best->bd_addr, addr_str);
+        ESP_LOGI(TAG, "Selected best candidate: %s RSSI=%d Discoverable=%d",
+                 addr_str, best->rssi, best->is_discoverable);
+
+        set_state(BT_HID_STATE_CONNECTING);
+        start_connect_timeout();
+        esp_hidh_dev_open((uint8_t *)best->bd_addr,
+                          best->is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
+    }
+
+    clear_pairing_candidates();
+}
+
+/* ============================================================================
  * Private Functions - HID Host Callback
  * ============================================================================ */
 
@@ -398,41 +542,10 @@ static void check_and_connect_device(const esp_bd_addr_t bd_addr, const char *na
     char addr_str[18];
     storage_bd_addr_to_str(bd_addr, addr_str);
 
-    // In pairing mode, connect to any HID device
-    if (s_pairing_mode) {
-        // Check if it's a keyboard (COD for Classic BT)
-        if (!is_ble && cod) {
-            // COD Major Device Class: bits 12-8 of full COD
-            // 0x05 = Peripheral (keyboard, mouse, etc.)
-            uint32_t cod_full = (cod->major << 8) | cod->minor;
-            uint8_t major_class = (cod_full >> 8) & 0x1F;
-            uint8_t minor_class = cod->minor;
+    // Note: Pairing mode is now handled separately in gap_event_handler and bt_gap_event_handler
+    // This function is only called when NOT in pairing mode (scanning for known device)
 
-            // Major class 0x05 = Peripheral, Minor 0x40 = Keyboard
-            if (major_class != 0x05) {  // Not a peripheral device
-                return;
-            }
-            if ((minor_class & 0xC0) != 0x40) {  // Not a keyboard
-                return;
-            }
-        }
-
-        ESP_LOGI(TAG, "Pairing: Found HID device %s (%s)", addr_str, name ? name : "unknown");
-
-        // Stop scan and connect
-        if (is_ble) {
-            esp_ble_gap_stop_scanning();
-        } else {
-            esp_bt_gap_cancel_discovery();
-        }
-
-        set_state(BT_HID_STATE_CONNECTING);
-        start_connect_timeout();
-        esp_hidh_dev_open((uint8_t *)bd_addr, is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT, 0);
-        return;
-    }
-
-    // Not pairing - check if this is our target device
+    // Check if this is our target device
     if (s_has_target && storage_bd_addr_equal(bd_addr, s_target_addr)) {
         ESP_LOGI(TAG, "Found target device %s", addr_str);
 
@@ -451,6 +564,28 @@ static void check_and_connect_device(const esp_bd_addr_t bd_addr, const char *na
 
 // HID Service UUID for BLE (0x1812)
 static const uint16_t HID_SERVICE_UUID = 0x1812;
+
+// BLE Advertising Flags
+#define BLE_ADV_FLAG_LIMITED_DISC   0x01  // Limited Discoverable Mode (usually pairing mode)
+#define BLE_ADV_FLAG_GENERAL_DISC   0x02  // General Discoverable Mode
+
+static bool ble_is_limited_discoverable(uint8_t *adv_data, uint8_t adv_data_len)
+{
+    if (adv_data == NULL || adv_data_len == 0) {
+        return false;
+    }
+
+    uint8_t flags_len = 0;
+    uint8_t *flags = esp_ble_resolve_adv_data(adv_data, ESP_BLE_AD_TYPE_FLAG, &flags_len);
+
+    if (flags != NULL && flags_len > 0) {
+        // Limited Discoverable Mode indicates device is actively seeking pairing
+        if (flags[0] & BLE_ADV_FLAG_LIMITED_DISC) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static bool ble_has_hid_service(uint8_t *adv_data, uint8_t adv_data_len)
 {
@@ -492,25 +627,44 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     switch (event) {
     case ESP_GAP_BLE_SCAN_RESULT_EVT:
         if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_RES_EVT) {
-            // In pairing mode, only connect to BLE devices advertising HID service
+            // In pairing mode, collect candidates instead of connecting immediately
             if (s_pairing_mode) {
                 if (!ble_has_hid_service(param->scan_rst.ble_adv, param->scan_rst.adv_data_len)) {
                     // Not a HID device, skip
                     return;
                 }
+
+                // Check if device is in Limited Discoverable Mode (pairing mode)
+                bool is_discoverable = ble_is_limited_discoverable(
+                    param->scan_rst.ble_adv, param->scan_rst.adv_data_len);
+
+                // Add to candidate list
+                add_pairing_candidate(
+                    param->scan_rst.bda,
+                    param->scan_rst.rssi,
+                    true,  // is_ble
+                    is_discoverable
+                );
+                return;
             }
 
-            // Found a BLE device (with HID service if in pairing mode)
+            // Not pairing mode - check for target device
             check_and_connect_device(
                 param->scan_rst.bda,
-                NULL,  // Name not available in scan result
+                NULL,
                 NULL,
                 param->scan_rst.rssi,
                 true
             );
         } else if (param->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_CMPL_EVT) {
             ESP_LOGI(TAG, "BLE scan complete");
-            if (get_state() == BT_HID_STATE_SCANNING || get_state() == BT_HID_STATE_PAIRING) {
+            bt_hid_state_t state = get_state();
+
+            if (state == BT_HID_STATE_PAIRING && s_pairing_mode) {
+                // Pairing mode: select best candidate after scan complete
+                ESP_LOGI(TAG, "BLE scan done, selecting best candidate...");
+                select_and_connect_best_candidate();
+            } else if (state == BT_HID_STATE_SCANNING) {
                 set_state(BT_HID_STATE_IDLE);
                 schedule_reconnect();
             }
@@ -529,6 +683,7 @@ static void bt_gap_event_handler(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_para
         // Found a Classic BT device
         char *name = NULL;
         esp_bt_cod_t *cod = NULL;
+        int rssi = -100;  // Default low RSSI
 
         // Extract device properties
         for (int i = 0; i < param->disc_res.num_prop; i++) {
@@ -545,16 +700,50 @@ static void bt_gap_event_handler(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_para
             case ESP_BT_GAP_DEV_PROP_COD:
                 cod = (esp_bt_cod_t *)param->disc_res.prop[i].val;
                 break;
+            case ESP_BT_GAP_DEV_PROP_RSSI:
+                rssi = *(int8_t *)param->disc_res.prop[i].val;
+                break;
             default:
                 break;
             }
         }
 
+        // In pairing mode, collect candidates
+        if (s_pairing_mode) {
+            // Check if it's a keyboard (COD check)
+            if (cod) {
+                uint32_t cod_full = (cod->major << 8) | cod->minor;
+                uint8_t major_class = (cod_full >> 8) & 0x1F;
+                uint8_t minor_class = cod->minor;
+
+                // Major class 0x05 = Peripheral, Minor 0x40 = Keyboard
+                if (major_class != 0x05 || (minor_class & 0xC0) != 0x40) {
+                    // Not a keyboard, skip
+                    break;
+                }
+            }
+
+            char addr_str[18];
+            storage_bd_addr_to_str(param->disc_res.bda, addr_str);
+            ESP_LOGI(TAG, "Classic BT HID found: %s (%s) RSSI=%d",
+                     addr_str, name ? name : "unknown", rssi);
+
+            // Classic BT devices discovered during inquiry are generally in discoverable mode
+            add_pairing_candidate(
+                param->disc_res.bda,
+                rssi,
+                false,  // is_ble
+                true    // Classic BT in inquiry = discoverable
+            );
+            break;
+        }
+
+        // Not pairing mode - check for target device
         check_and_connect_device(
             param->disc_res.bda,
             name,
             cod,
-            0,
+            rssi,
             false
         );
         break;
@@ -562,8 +751,14 @@ static void bt_gap_event_handler(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_para
 
     case ESP_BT_GAP_DISC_STATE_CHANGED_EVT:
         if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED) {
-            ESP_LOGI(TAG, "BT scan stopped");
-            if (get_state() == BT_HID_STATE_SCANNING) {
+            ESP_LOGI(TAG, "Classic BT scan stopped");
+            bt_hid_state_t state = get_state();
+
+            if (state == BT_HID_STATE_PAIRING && s_pairing_mode) {
+                // Pairing mode: select best candidate after scan complete
+                ESP_LOGI(TAG, "Classic BT scan done, selecting best candidate...");
+                select_and_connect_best_candidate();
+            } else if (state == BT_HID_STATE_SCANNING) {
                 set_state(BT_HID_STATE_IDLE);
                 schedule_reconnect();
             }
@@ -890,6 +1085,9 @@ esp_err_t bt_hid_host_start_pairing(void)
     }
 
     ESP_LOGI(TAG, "Entering pairing mode");
+
+    // Clear any previous candidates
+    clear_pairing_candidates();
 
     s_pairing_mode = true;
     s_auto_reconnect = false;
