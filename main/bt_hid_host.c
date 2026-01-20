@@ -252,8 +252,7 @@ static esp_hid_scan_result_t *find_best_device(esp_hid_scan_result_t *results,
 
         if (pairing_mode) {
             // Pairing mode: prefer keyboards with strongest signal
-            if (r->usage == ESP_HID_USAGE_KEYBOARD ||
-                r->usage == ESP_HID_USAGE_KBD_POINTER) {
+            if (r->usage == ESP_HID_USAGE_KEYBOARD) {
                 if (best == NULL || r->rssi > best->rssi) {
                     best = r;
                 }
