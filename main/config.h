@@ -55,6 +55,15 @@
 // Connection retry delay (milliseconds)
 #define BT_RETRY_DELAY_MS       3000
 
+// Static passkey for BLE pairing (6 digits)
+// When pairing with a BLE keyboard, enter this code on the keyboard
+// Set to 0 to disable static passkey (random passkey will be shown in log)
+#define BT_BLE_STATIC_PASSKEY   123456
+
+// PIN code for Classic BT pairing (4 characters)
+// Most Classic BT keyboards use "0000" or "1234"
+#define BT_CLASSIC_PIN_CODE     "0000"
+
 // Key release timeout - auto-release all keys if no input (milliseconds)
 #define KEY_RELEASE_TIMEOUT_MS  100
 
