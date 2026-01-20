@@ -40,6 +40,66 @@ static const char *TAG = "MAIN";
 static paired_device_t s_paired_device = {0};
 static bool s_has_paired = false;
 
+// Button event handling task
+static TaskHandle_t s_button_task_handle = NULL;
+
+// Button event queue - used to offload heavy BT operations from timer context
+typedef enum {
+    BUTTON_TASK_EVENT_SHORT_PRESS = 1,
+    BUTTON_TASK_EVENT_LONG_PRESS = 2,
+} button_task_event_t;
+
+/* ============================================================================
+ * Button Event Handler Task
+ * ============================================================================ */
+
+/**
+ * @brief Dedicated task for handling button events
+ *
+ * This task offloads heavy Bluetooth operations from the Timer Service task
+ * context to prevent stack overflow. Button callbacks from timer run in
+ * Timer Service task with limited stack (2048 bytes default), which is
+ * insufficient for BT API calls that internally allocate large structures.
+ */
+static void button_event_task(void *pvParameters)
+{
+    uint32_t notification_value;
+
+    ESP_LOGI(TAG, "Button event handler task started (stack: %d bytes)",
+             CONFIG_ESP_MAIN_TASK_STACK_SIZE);
+
+    while (1) {
+        // Wait for button event notification from timer callback
+        if (xTaskNotifyWait(0, ULONG_MAX, &notification_value, portMAX_DELAY) == pdTRUE) {
+            button_task_event_t event = (button_task_event_t)notification_value;
+
+            switch (event) {
+            case BUTTON_TASK_EVENT_SHORT_PRESS:
+                ESP_LOGI(TAG, "Button: Short press");
+                // Short press - could be used for future features
+                break;
+
+            case BUTTON_TASK_EVENT_LONG_PRESS:
+                ESP_LOGI(TAG, "Button: Long press - entering pairing mode");
+
+                // Release all keys before changing mode
+                ch9329_release_all_keys();
+
+                // Start pairing (heavy BT operation - safe in dedicated task)
+                esp_err_t ret = bt_hid_host_start_pairing();
+                if (ret != ESP_OK) {
+                    ESP_LOGW(TAG, "Failed to start pairing: %s", esp_err_to_name(ret));
+                }
+                break;
+
+            default:
+                ESP_LOGW(TAG, "Unknown button event: %lu", (unsigned long)notification_value);
+                break;
+            }
+        }
+    }
+}
+
 /* ============================================================================
  * Callback Functions
  * ============================================================================ */
@@ -99,33 +159,37 @@ static void on_bt_state_change(bt_hid_state_t state)
 }
 
 /**
- * @brief Button event callback
+ * @brief Button event callback (runs in Timer Service task context)
+ *
+ * This callback runs in FreeRTOS Timer Service task, which has limited stack.
+ * We MUST NOT call heavy Bluetooth APIs here. Instead, notify the dedicated
+ * button_event_task to handle the actual work.
  */
 static void on_button_event(button_event_t event)
 {
+    if (s_button_task_handle == NULL) {
+        ESP_LOGW(TAG, "Button task not initialized");
+        return;
+    }
+
+    // Map button event to task event
+    button_task_event_t task_event;
     switch (event) {
     case BUTTON_EVENT_SHORT_PRESS:
-        // Short press - could be used for future features
-        ESP_LOGI(TAG, "Button: Short press");
+        task_event = BUTTON_TASK_EVENT_SHORT_PRESS;
         break;
-
     case BUTTON_EVENT_LONG_PRESS:
-        // Long press - enter pairing mode
-        ESP_LOGI(TAG, "Button: Long press - entering pairing mode");
-
-        // Release all keys before changing mode
-        ch9329_release_all_keys();
-
-        // Start pairing
-        esp_err_t ret = bt_hid_host_start_pairing();
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to start pairing: %s", esp_err_to_name(ret));
-        }
+        task_event = BUTTON_TASK_EVENT_LONG_PRESS;
         break;
-
     default:
-        break;
+        return;
     }
+
+    // Send notification to button task (non-blocking, safe from timer context)
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xTaskNotifyFromISR(s_button_task_handle, task_event, eSetValueWithOverwrite,
+                       &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 /* ============================================================================
@@ -177,7 +241,22 @@ static esp_err_t init_all(void)
         return ret;
     }
 
-    // 5. Initialize button handler
+    // 5. Create button event handler task
+    ESP_LOGI(TAG, "Creating button event handler task...");
+    BaseType_t task_ret = xTaskCreate(
+        button_event_task,
+        "button_evt",
+        4096,  // Stack size (bytes) - needs to be large enough for BT API calls
+        NULL,
+        5,     // Priority (same as main task)
+        &s_button_task_handle
+    );
+    if (task_ret != pdPASS || s_button_task_handle == NULL) {
+        ESP_LOGE(TAG, "Failed to create button event task");
+        return ESP_FAIL;
+    }
+
+    // 6. Initialize button handler
     ESP_LOGI(TAG, "Initializing button handler...");
     ret = button_init(on_button_event);
     if (ret != ESP_OK) {
@@ -185,7 +264,7 @@ static esp_err_t init_all(void)
         return ret;
     }
 
-    // 6. Initialize LED status indicator
+    // 7. Initialize LED status indicator
     ESP_LOGI(TAG, "Initializing LED status...");
     ret = led_status_init();
     if (ret != ESP_OK) {
