@@ -105,6 +105,23 @@ static void button_event_task(void *pvParameters)
  * ============================================================================ */
 
 /**
+ * @brief LED status callback from CH9329 (UART RX)
+ *
+ * Called when LED status is received from host PC via CH9329.
+ * Forwards to connected BT keyboard.
+ */
+static void on_led_status(uint8_t led_status)
+{
+    ESP_LOGI(TAG, "LED status received from CH9329: 0x%02X", led_status);
+
+    // Forward LED status to BT keyboard
+    esp_err_t ret = bt_hid_host_send_led_status(led_status);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "Failed to send LED status to keyboard: %s", esp_err_to_name(ret));
+    }
+}
+
+/**
  * @brief Keyboard input callback from BT HID Host
  *
  * Called when keyboard data is received. Forwards to CH9329.
@@ -233,6 +250,14 @@ static esp_err_t init_all(void)
         return ret;
     }
 
+    // Set LED callback and start RX task
+    ch9329_set_led_callback(on_led_status);
+    ret = ch9329_start_rx_task();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "CH9329 RX task start failed (non-critical): %s", esp_err_to_name(ret));
+        // Continue without LED feedback - not critical
+    }
+
     // 4. Initialize Bluetooth HID Host
     ESP_LOGI(TAG, "Initializing Bluetooth HID Host...");
     ret = bt_hid_host_init(on_keyboard_input, on_bt_state_change);
@@ -296,9 +321,10 @@ void app_main(void)
 
     // Start operation
     if (s_has_paired) {
-        // Scan for paired device
-        ESP_LOGI(TAG, "Scanning for paired device...");
-        bt_hid_host_scan_for_device(s_paired_device.bd_addr, s_paired_device.is_ble);
+        // Set target device and attempt direct connection (faster than scanning)
+        ESP_LOGI(TAG, "Attempting direct connection to paired device...");
+        bt_hid_host_set_target(s_paired_device.bd_addr, s_paired_device.is_ble, s_paired_device.addr_type);
+        bt_hid_host_connect_direct(s_paired_device.bd_addr, s_paired_device.is_ble, s_paired_device.addr_type);
     } else {
         // No paired device - enter pairing mode
         ESP_LOGI(TAG, "No paired device, entering pairing mode...");

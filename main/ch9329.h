@@ -105,4 +105,27 @@ esp_err_t ch9329_release_all_keys(void);
  */
 bool ch9329_is_ready(void);
 
+/**
+ * @brief LED status callback type
+ * @param led_status LED status byte (Bit0=NumLock, Bit1=CapsLock, Bit2=ScrollLock)
+ */
+typedef void (*ch9329_led_cb_t)(uint8_t led_status);
+
+/**
+ * @brief Set LED status callback
+ * @param cb Callback function to receive LED status updates
+ */
+void ch9329_set_led_callback(ch9329_led_cb_t cb);
+
+/**
+ * @brief Start UART RX task for LED status monitoring
+ * @return ESP_OK on success
+ */
+esp_err_t ch9329_start_rx_task(void);
+
+/**
+ * @brief Stop UART RX task
+ */
+void ch9329_stop_rx_task(void);
+
 #endif /* CH9329_H */
