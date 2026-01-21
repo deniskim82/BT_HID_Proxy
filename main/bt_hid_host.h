@@ -115,4 +115,44 @@ bool bt_hid_host_is_connected(void);
  */
 esp_err_t bt_hid_host_get_connected_device(esp_bd_addr_t bd_addr, bool *is_ble);
 
+/**
+ * @brief Send LED status to connected HID device
+ * @param led_status LED status byte (Bit0=NumLock, Bit1=CapsLock, Bit2=ScrollLock)
+ * @return ESP_OK on success
+ */
+esp_err_t bt_hid_host_send_led_status(uint8_t led_status);
+
+/**
+ * @brief Directly connect to saved device without scanning
+ *
+ * This function attempts to connect directly to the saved paired device
+ * without performing a BLE/BT scan first. This is faster when the device
+ * is already known to be nearby.
+ *
+ * @param target_addr Address of device to connect to
+ * @param is_ble true if target is BLE device
+ * @param addr_type BLE address type (only used for BLE devices)
+ * @return ESP_OK if connection started
+ */
+esp_err_t bt_hid_host_connect_direct(const esp_bd_addr_t target_addr, bool is_ble, uint8_t addr_type);
+
+/**
+ * @brief Set target device for auto-reconnection
+ * @param target_addr Address of device
+ * @param is_ble true if BLE device
+ * @param addr_type BLE address type
+ */
+void bt_hid_host_set_target(const esp_bd_addr_t target_addr, bool is_ble, uint8_t addr_type);
+
+/**
+ * @brief Clear target device (disables auto-reconnection)
+ */
+void bt_hid_host_clear_target(void);
+
+/**
+ * @brief Check if there is a target device set
+ * @return true if target device is set
+ */
+bool bt_hid_host_has_target(void);
+
 #endif /* BT_HID_HOST_H */

@@ -14,6 +14,8 @@
 #include <string.h>
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "CH9329";
 
@@ -30,6 +32,16 @@ static uint8_t s_frame_buf[CH9329_FRAME_BUF_SIZE];
 // Last sent report for duplicate detection (as uint64_t for fast comparison)
 static uint64_t s_last_report = 0;
 static bool s_last_report_valid = false;
+
+// LED status callback
+static ch9329_led_cb_t s_led_callback = NULL;
+
+// RX task handle
+static TaskHandle_t s_rx_task_handle = NULL;
+static volatile bool s_rx_task_running = false;
+
+// Last LED status for duplicate detection
+static uint8_t s_last_led_status = 0xFF; // Initialize to invalid value
 
 /* ============================================================================
  * Private Functions
@@ -228,4 +240,183 @@ esp_err_t ch9329_release_all_keys(void)
 bool ch9329_is_ready(void)
 {
     return s_initialized;
+}
+
+void ch9329_set_led_callback(ch9329_led_cb_t cb)
+{
+    s_led_callback = cb;
+}
+
+/**
+ * @brief Parse CH9329 response frame for LED status
+ *
+ * CH9329 sends LED status in response frame:
+ * [0x57][0xAB][ADDR][CMD][LEN][DATA...][CHECKSUM]
+ *
+ * LED status response: CMD=0x81 (response), contains LED byte
+ * Bit 0 = Num Lock
+ * Bit 1 = Caps Lock
+ * Bit 2 = Scroll Lock
+ */
+static void parse_rx_frame(const uint8_t *data, size_t len)
+{
+    // Minimum frame size: header(2) + addr(1) + cmd(1) + len(1) + checksum(1) = 6
+    if (len < 6) {
+        return;
+    }
+
+    // Verify header
+    if (data[0] != CH9329_HEADER_1 || data[1] != CH9329_HEADER_2) {
+        return;
+    }
+
+    uint8_t cmd = data[3];
+    uint8_t data_len = data[4];
+
+    // Verify frame length
+    if (len < (size_t)(5 + data_len + 1)) {
+        return;
+    }
+
+    // Log received frame for debugging
+    ESP_LOGI(TAG, "RX frame: CMD=0x%02X LEN=%d", cmd, data_len);
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, len, ESP_LOG_DEBUG);
+
+    // Check for response command (0x81) or keyboard LED status
+    // Some CH9329 firmware sends LED status with CMD=0x02 (keyboard) or 0x81 (response)
+    if (cmd == CH9329_CMD_RESPONSE && data_len >= 1) {
+        // Response packet - check for LED status in data
+        uint8_t led_status = data[5];
+
+        // Only process if changed
+        if (led_status != s_last_led_status) {
+            s_last_led_status = led_status;
+
+            ESP_LOGI(TAG, "LED status: 0x%02X (Num=%d Caps=%d Scroll=%d)",
+                     led_status,
+                     (led_status & 0x01) ? 1 : 0,
+                     (led_status & 0x02) ? 1 : 0,
+                     (led_status & 0x04) ? 1 : 0);
+
+            if (s_led_callback) {
+                s_led_callback(led_status);
+            }
+        }
+    }
+}
+
+/**
+ * @brief UART RX task for receiving LED status from CH9329
+ */
+static void uart_rx_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "UART RX task started");
+    s_rx_task_running = true;
+
+    uint8_t rx_buffer[64];
+    size_t rx_pos = 0;
+
+    while (s_rx_task_running) {
+        // Read available data
+        int len = uart_read_bytes(CH9329_UART_NUM, &rx_buffer[rx_pos],
+                                  sizeof(rx_buffer) - rx_pos,
+                                  pdMS_TO_TICKS(100));
+
+        if (len > 0) {
+            rx_pos += len;
+
+            ESP_LOGD(TAG, "UART RX: %d bytes (total=%d)", len, rx_pos);
+            ESP_LOG_BUFFER_HEX_LEVEL(TAG, rx_buffer, rx_pos, ESP_LOG_DEBUG);
+
+            // Try to find and parse complete frames
+            // Look for frame header 0x57 0xAB
+            size_t i = 0;
+            while (i < rx_pos) {
+                // Find header
+                if (rx_buffer[i] == CH9329_HEADER_1 && i + 1 < rx_pos && rx_buffer[i + 1] == CH9329_HEADER_2) {
+                    // Found header, check if we have enough for length field
+                    if (i + 5 <= rx_pos) {
+                        uint8_t data_len = rx_buffer[i + 4];
+                        size_t frame_len = 5 + data_len + 1;  // header(2) + addr(1) + cmd(1) + len(1) + data + checksum(1)
+
+                        if (i + frame_len <= rx_pos) {
+                            // Complete frame found
+                            parse_rx_frame(&rx_buffer[i], frame_len);
+                            i += frame_len;
+                            continue;
+                        } else {
+                            // Incomplete frame, wait for more data
+                            break;
+                        }
+                    } else {
+                        // Not enough data for length field
+                        break;
+                    }
+                }
+                i++;
+            }
+
+            // Move remaining data to beginning of buffer
+            if (i > 0 && i < rx_pos) {
+                memmove(rx_buffer, &rx_buffer[i], rx_pos - i);
+                rx_pos -= i;
+            } else if (i >= rx_pos) {
+                rx_pos = 0;
+            }
+
+            // Prevent buffer overflow
+            if (rx_pos >= sizeof(rx_buffer) - 16) {
+                ESP_LOGW(TAG, "RX buffer overflow, resetting");
+                rx_pos = 0;
+            }
+        }
+    }
+
+    ESP_LOGI(TAG, "UART RX task stopped");
+    s_rx_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+esp_err_t ch9329_start_rx_task(void)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_rx_task_handle != NULL) {
+        ESP_LOGW(TAG, "RX task already running");
+        return ESP_OK;
+    }
+
+    BaseType_t ret = xTaskCreate(
+        uart_rx_task,
+        "ch9329_rx",
+        2048,
+        NULL,
+        3,  // Priority
+        &s_rx_task_handle
+    );
+
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create RX task");
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+void ch9329_stop_rx_task(void)
+{
+    if (s_rx_task_handle == NULL) {
+        return;
+    }
+
+    s_rx_task_running = false;
+
+    // Wait for task to finish
+    int timeout = 20;
+    while (s_rx_task_handle != NULL && timeout > 0) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        timeout--;
+    }
 }

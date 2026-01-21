@@ -58,7 +58,11 @@ static bool s_connected_is_ble = false;
 // Target device for scanning (from NVS)
 static esp_bd_addr_t s_target_addr = {0};
 static bool s_target_is_ble = false;
+static uint8_t s_target_addr_type = 0;  // BLE address type
 static bool s_has_target = false;
+
+// Direct connection mode (skip scan)
+static volatile bool s_direct_connect_requested = false;
 
 // Task control
 static TaskHandle_t s_hid_task_handle = NULL;
@@ -69,6 +73,7 @@ typedef enum {
     HID_CMD_SCAN_TARGET,
     HID_CMD_PAIRING,
     HID_CMD_STOP,
+    HID_CMD_DIRECT_CONNECT,  // Direct connection without scan
 } hid_task_cmd_t;
 
 static volatile hid_task_cmd_t s_pending_cmd = HID_CMD_NONE;
@@ -292,24 +297,79 @@ static esp_hid_scan_result_t *find_best_device(esp_hid_scan_result_t *results,
 }
 
 /**
+ * @brief Attempt direct connection to saved device without scanning
+ * @return true if connection attempt started, false otherwise
+ */
+static bool try_direct_connect(void)
+{
+    if (!s_has_target) {
+        return false;
+    }
+
+    char addr_str[18];
+    storage_bd_addr_to_str(s_target_addr, addr_str);
+    ESP_LOGI(TAG, "Direct connect to %s (BLE=%d, addr_type=%d)",
+             addr_str, s_target_is_ble, s_target_addr_type);
+
+    set_state(BT_HID_STATE_CONNECTING);
+
+    esp_hid_transport_t transport = s_target_is_ble ? ESP_HID_TRANSPORT_BLE : ESP_HID_TRANSPORT_BT;
+
+    esp_hidh_dev_t *dev = esp_hidh_dev_open(s_target_addr, transport, s_target_addr_type);
+
+    if (dev == NULL) {
+        ESP_LOGW(TAG, "esp_hidh_dev_open failed for direct connect");
+        return false;
+    }
+
+    // Wait for connection result (shorter timeout for direct connect)
+    int timeout_count = 0;
+    while (get_state() == BT_HID_STATE_CONNECTING && timeout_count < 20) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+        timeout_count++;
+    }
+
+    return (get_state() == BT_HID_STATE_CONNECTED);
+}
+
+/**
  * @brief Main HID task - handles scanning and connection
  *
  * This task runs scan and connect operations which can block.
  * It's triggered by notifications from bt_hid_host_start_pairing()
  * or bt_hid_host_scan_for_device().
+ *
+ * Reconnection strategy:
+ * 1. If paired device exists, try direct connection first (faster)
+ * 2. If direct connection fails, fall back to scanning
+ * 3. No long timeouts - continuously retry until connected
  */
 static void hid_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "HID task started");
     s_task_running = true;
 
+    int reconnect_attempt = 0;
+    bool was_connected = false;
+
     while (1) {
-        // Wait for command
+        // Wait for command or timeout
         uint32_t cmd = 0;
-        if (xTaskNotifyWait(0, ULONG_MAX, &cmd, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        TickType_t wait_time;
+
+        // Shorter wait when we have a target and are idle (fast reconnect)
+        if (s_has_target && get_state() == BT_HID_STATE_IDLE) {
+            // Exponential backoff: 500ms, 1s, 2s, 3s (max)
+            wait_time = pdMS_TO_TICKS(500 + (reconnect_attempt > 5 ? 2500 : reconnect_attempt * 500));
+        } else {
+            wait_time = pdMS_TO_TICKS(1000);
+        }
+
+        if (xTaskNotifyWait(0, ULONG_MAX, &cmd, wait_time) != pdTRUE) {
             // Timeout - check if we should auto-reconnect
             if (s_has_target && get_state() == BT_HID_STATE_IDLE) {
-                cmd = HID_CMD_SCAN_TARGET;
+                // First try direct connection (faster)
+                cmd = HID_CMD_DIRECT_CONNECT;
             } else {
                 continue;
             }
@@ -319,8 +379,44 @@ static void hid_task(void *pvParameters)
             break;
         }
 
-        bool pairing_mode = (cmd == HID_CMD_PAIRING);
+        // If already connected, skip
+        if (get_state() == BT_HID_STATE_CONNECTED) {
+            reconnect_attempt = 0;
+            was_connected = true;
+            continue;
+        }
 
+        bool pairing_mode = (cmd == HID_CMD_PAIRING);
+        bool direct_mode = (cmd == HID_CMD_DIRECT_CONNECT);
+
+        // Handle direct connection (reconnection without scan)
+        if (direct_mode && s_has_target) {
+            ESP_LOGI(TAG, "Attempting direct reconnection (attempt %d)...", reconnect_attempt + 1);
+
+            if (try_direct_connect()) {
+                ESP_LOGI(TAG, "Direct connection successful!");
+                reconnect_attempt = 0;
+                was_connected = true;
+                continue;
+            }
+
+            // Direct connection failed
+            reconnect_attempt++;
+
+            // After several failed direct attempts, try scanning
+            if (reconnect_attempt >= 3 && !was_connected) {
+                // If we've never connected before, fall back to scan
+                ESP_LOGI(TAG, "Direct connection failed, falling back to scan");
+                cmd = HID_CMD_SCAN_TARGET;
+                direct_mode = false;
+            } else {
+                // For known devices, keep trying direct connection
+                set_state(BT_HID_STATE_IDLE);
+                continue;
+            }
+        }
+
+        // Scan mode (pairing or reconnect via scan)
         if (pairing_mode) {
             set_state(BT_HID_STATE_PAIRING);
         } else {
@@ -338,8 +434,9 @@ static void hid_task(void *pvParameters)
 
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Scan failed: %s", esp_err_to_name(ret));
-            set_state(BT_HID_STATE_ERROR);
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            set_state(BT_HID_STATE_IDLE);
+            // Short delay before retry
+            vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
@@ -348,7 +445,8 @@ static void hid_task(void *pvParameters)
         if (num_results == 0) {
             ESP_LOGW(TAG, "No HID devices found");
             set_state(BT_HID_STATE_IDLE);
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            // Short delay before retry (will attempt direct connect next)
+            vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
@@ -359,7 +457,7 @@ static void hid_task(void *pvParameters)
             ESP_LOGW(TAG, "No suitable device found");
             esp_hid_scan_results_free(results);
             set_state(BT_HID_STATE_IDLE);
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
@@ -379,8 +477,8 @@ static void hid_task(void *pvParameters)
         if (dev == NULL) {
             ESP_LOGE(TAG, "esp_hidh_dev_open failed");
             esp_hid_scan_results_free(results);
-            set_state(BT_HID_STATE_ERROR);
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            set_state(BT_HID_STATE_IDLE);
+            vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
@@ -396,6 +494,7 @@ static void hid_task(void *pvParameters)
             // Update target
             memcpy(s_target_addr, target->bda, sizeof(esp_bd_addr_t));
             s_target_is_ble = new_device.is_ble;
+            s_target_addr_type = target->ble.addr_type;
             s_has_target = true;
 
             // Save to NVS
@@ -406,20 +505,24 @@ static void hid_task(void *pvParameters)
         esp_hid_scan_results_free(results);
 
         // Connection is async - wait for OPEN event or timeout
-        // The hidh_callback will update state to CONNECTED on success
         int timeout_count = 0;
-        while (get_state() == BT_HID_STATE_CONNECTING && timeout_count < 30) {
-            vTaskDelay(pdMS_TO_TICKS(500));
+        while (get_state() == BT_HID_STATE_CONNECTING && timeout_count < 20) {
+            vTaskDelay(pdMS_TO_TICKS(250));
             timeout_count++;
         }
 
-        if (get_state() != BT_HID_STATE_CONNECTED) {
+        if (get_state() == BT_HID_STATE_CONNECTED) {
+            ESP_LOGI(TAG, "Connection established!");
+            reconnect_attempt = 0;
+            was_connected = true;
+        } else {
             ESP_LOGW(TAG, "Connection timeout or failed");
             set_state(BT_HID_STATE_IDLE);
+            reconnect_attempt++;
         }
 
-        // Small delay before next operation
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // Very short delay before next operation
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     s_task_running = false;
@@ -664,4 +767,88 @@ esp_err_t bt_hid_host_get_connected_device(esp_bd_addr_t bd_addr, bool *is_ble)
     }
 
     return ESP_OK;
+}
+
+esp_err_t bt_hid_host_send_led_status(uint8_t led_status)
+{
+    if (!s_initialized || s_connected_dev == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Sending LED status: 0x%02X (Num=%d Caps=%d Scroll=%d)",
+             led_status,
+             (led_status & 0x01) ? 1 : 0,
+             (led_status & 0x02) ? 1 : 0,
+             (led_status & 0x04) ? 1 : 0);
+
+    // Send output report to keyboard
+    // For keyboard LED, report_id is typically 0, map_index is 0
+    // LED status is 1 byte
+    esp_err_t ret = esp_hidh_dev_output_set(s_connected_dev, 0, 0, &led_status, 1);
+
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to send LED status: %s", esp_err_to_name(ret));
+    }
+
+    return ret;
+}
+
+esp_err_t bt_hid_host_connect_direct(const esp_bd_addr_t target_addr, bool is_ble, uint8_t addr_type)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    bt_hid_state_t state = get_state();
+    if (state == BT_HID_STATE_CONNECTED) {
+        ESP_LOGW(TAG, "Already connected");
+        return ESP_OK;
+    }
+
+    // Set target
+    if (target_addr) {
+        memcpy(s_target_addr, target_addr, sizeof(esp_bd_addr_t));
+        s_target_is_ble = is_ble;
+        s_target_addr_type = addr_type;
+        s_has_target = true;
+
+        char addr_str[18];
+        storage_bd_addr_to_str(s_target_addr, addr_str);
+        ESP_LOGI(TAG, "Direct connecting to: %s (BLE=%d)", addr_str, is_ble);
+    }
+
+    // Signal task to do direct connect
+    if (s_hid_task_handle) {
+        xTaskNotify(s_hid_task_handle, HID_CMD_DIRECT_CONNECT, eSetValueWithOverwrite);
+    }
+
+    return ESP_OK;
+}
+
+void bt_hid_host_set_target(const esp_bd_addr_t target_addr, bool is_ble, uint8_t addr_type)
+{
+    if (target_addr == NULL) {
+        return;
+    }
+
+    memcpy(s_target_addr, target_addr, sizeof(esp_bd_addr_t));
+    s_target_is_ble = is_ble;
+    s_target_addr_type = addr_type;
+    s_has_target = true;
+
+    char addr_str[18];
+    storage_bd_addr_to_str(s_target_addr, addr_str);
+    ESP_LOGI(TAG, "Target device set: %s (BLE=%d, addr_type=%d)", addr_str, is_ble, addr_type);
+}
+
+void bt_hid_host_clear_target(void)
+{
+    s_has_target = false;
+    memset(s_target_addr, 0, sizeof(esp_bd_addr_t));
+    ESP_LOGI(TAG, "Target device cleared");
+}
+
+bool bt_hid_host_has_target(void)
+{
+    return s_has_target;
 }
