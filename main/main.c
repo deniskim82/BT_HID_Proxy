@@ -121,6 +121,44 @@ static void on_led_status(uint8_t led_status)
     }
 }
 
+// USB HID key codes for LED-related keys
+#define HID_KEY_CAPS_LOCK    0x39
+#define HID_KEY_NUM_LOCK     0x53
+#define HID_KEY_SCROLL_LOCK  0x47
+
+// Track previous key state to detect key press (not release)
+static uint8_t s_prev_keys[6] = {0};
+
+/**
+ * @brief Check if a key code is in the key array
+ */
+static bool has_key(const uint8_t *keys, uint8_t key_code)
+{
+    for (int i = 0; i < 6; i++) {
+        if (keys[i] == key_code) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief Check if an LED-related key was just pressed (not held or released)
+ */
+static bool led_key_pressed(const uint8_t *curr_keys, const uint8_t *prev_keys)
+{
+    // Check if CapsLock, NumLock, or ScrollLock was just pressed
+    const uint8_t led_keys[] = {HID_KEY_CAPS_LOCK, HID_KEY_NUM_LOCK, HID_KEY_SCROLL_LOCK};
+
+    for (int i = 0; i < 3; i++) {
+        // Key is in current report but not in previous = just pressed
+        if (has_key(curr_keys, led_keys[i]) && !has_key(prev_keys, led_keys[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /**
  * @brief Keyboard input callback from BT HID Host
  *
@@ -134,6 +172,18 @@ static void on_keyboard_input(const uint8_t *data)
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to send keyboard data: %s", esp_err_to_name(ret));
     }
+
+    // Check if LED-related key was just pressed
+    const uint8_t *curr_keys = &data[2];  // keys start at offset 2
+    if (led_key_pressed(curr_keys, s_prev_keys)) {
+        // Request LED status after short delay for PC to process
+        // The delay happens naturally as CH9329 processes the key and PC responds
+        vTaskDelay(pdMS_TO_TICKS(50));
+        ch9329_request_led_status();
+    }
+
+    // Save current keys for next comparison
+    memcpy(s_prev_keys, curr_keys, 6);
 
     // Debug logging (minimal to reduce latency)
     ESP_LOGD(TAG, "KB: %02X %02X %02X %02X %02X %02X %02X %02X",
