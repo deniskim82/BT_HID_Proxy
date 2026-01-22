@@ -250,13 +250,12 @@ void ch9329_set_led_callback(ch9329_led_cb_t cb)
 /**
  * @brief Parse CH9329 response frame for LED status
  *
- * CH9329 sends LED status in response frame:
+ * CH9329 sends responses in frame format:
  * [0x57][0xAB][ADDR][CMD][LEN][DATA...][CHECKSUM]
  *
- * LED status response: CMD=0x81 (response), contains LED byte
- * Bit 0 = Num Lock
- * Bit 1 = Caps Lock
- * Bit 2 = Scroll Lock
+ * Response types:
+ * - CMD=0x82: Keyboard ACK (ignore - too frequent)
+ * - CMD=0x8D: LED status response (Bit0=Num, Bit1=Caps, Bit2=Scroll)
  */
 static void parse_rx_frame(const uint8_t *data, size_t len)
 {
@@ -273,19 +272,21 @@ static void parse_rx_frame(const uint8_t *data, size_t len)
     uint8_t cmd = data[3];
     uint8_t data_len = data[4];
 
-    // Verify frame length
-    if (len < (size_t)(5 + data_len + 1)) {
+    // Sanity check data_len to prevent issues
+    if (data_len > 64 || len < (size_t)(5 + data_len + 1)) {
         return;
     }
 
-    // Log received frame for debugging
-    ESP_LOGI(TAG, "RX frame: CMD=0x%02X LEN=%d", cmd, data_len);
-    ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, len, ESP_LOG_DEBUG);
+    // Ignore keyboard ACK (0x82) - comes for every keystroke, too frequent
+    if (cmd == CH9329_CMD_KB_ACK) {
+        return;
+    }
 
-    // Check for response command (0x81) or keyboard LED status
-    // Some CH9329 firmware sends LED status with CMD=0x02 (keyboard) or 0x81 (response)
-    if (cmd == CH9329_CMD_RESPONSE && data_len >= 1) {
-        // Response packet - check for LED status in data
+    // Log non-ACK frames at DEBUG level
+    ESP_LOGD(TAG, "RX frame: CMD=0x%02X LEN=%d", cmd, data_len);
+
+    // Check for LED status response (0x8D)
+    if (cmd == CH9329_CMD_LED_RESPONSE && data_len >= 1) {
         uint8_t led_status = data[5];
 
         // Only process if changed
@@ -307,6 +308,8 @@ static void parse_rx_frame(const uint8_t *data, size_t len)
 
 /**
  * @brief UART RX task for receiving LED status from CH9329
+ *
+ * Also periodically polls LED status since CH9329 doesn't push it automatically.
  */
 static void uart_rx_task(void *pvParameters)
 {
@@ -315,9 +318,10 @@ static void uart_rx_task(void *pvParameters)
 
     uint8_t rx_buffer[64];
     size_t rx_pos = 0;
+    int poll_counter = 0;
 
     while (s_rx_task_running) {
-        // Read available data
+        // Read available data (100ms timeout)
         int len = uart_read_bytes(CH9329_UART_NUM, &rx_buffer[rx_pos],
                                   sizeof(rx_buffer) - rx_pos,
                                   pdMS_TO_TICKS(100));
@@ -325,11 +329,7 @@ static void uart_rx_task(void *pvParameters)
         if (len > 0) {
             rx_pos += len;
 
-            ESP_LOGD(TAG, "UART RX: %d bytes (total=%d)", len, rx_pos);
-            ESP_LOG_BUFFER_HEX_LEVEL(TAG, rx_buffer, rx_pos, ESP_LOG_DEBUG);
-
             // Try to find and parse complete frames
-            // Look for frame header 0x57 0xAB
             size_t i = 0;
             while (i < rx_pos) {
                 // Find header
@@ -337,7 +337,14 @@ static void uart_rx_task(void *pvParameters)
                     // Found header, check if we have enough for length field
                     if (i + 5 <= rx_pos) {
                         uint8_t data_len = rx_buffer[i + 4];
-                        size_t frame_len = 5 + data_len + 1;  // header(2) + addr(1) + cmd(1) + len(1) + data + checksum(1)
+
+                        // Sanity check
+                        if (data_len > 64) {
+                            i++;
+                            continue;
+                        }
+
+                        size_t frame_len = 5 + data_len + 1;
 
                         if (i + frame_len <= rx_pos) {
                             // Complete frame found
@@ -366,9 +373,15 @@ static void uart_rx_task(void *pvParameters)
 
             // Prevent buffer overflow
             if (rx_pos >= sizeof(rx_buffer) - 16) {
-                ESP_LOGW(TAG, "RX buffer overflow, resetting");
                 rx_pos = 0;
             }
+        }
+
+        // Poll LED status every ~500ms (5 * 100ms timeout)
+        poll_counter++;
+        if (poll_counter >= 5) {
+            poll_counter = 0;
+            ch9329_request_led_status();
         }
     }
 
@@ -391,7 +404,7 @@ esp_err_t ch9329_start_rx_task(void)
     BaseType_t ret = xTaskCreate(
         uart_rx_task,
         "ch9329_rx",
-        2048,
+        4096,   // Increased stack for safety
         NULL,
         3,  // Priority
         &s_rx_task_handle
@@ -419,4 +432,35 @@ void ch9329_stop_rx_task(void)
         vTaskDelay(pdMS_TO_TICKS(50));
         timeout--;
     }
+}
+
+esp_err_t ch9329_request_led_status(void)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Build GET_LED_STATUS command frame
+    // [0x57][0xAB][ADDR][CMD][LEN][CHECKSUM]
+    uint8_t cmd_frame[6];
+    cmd_frame[0] = CH9329_HEADER_1;      // 0x57
+    cmd_frame[1] = CH9329_HEADER_2;      // 0xAB
+    cmd_frame[2] = CH9329_ADDR_DEFAULT;  // 0x00
+    cmd_frame[3] = CH9329_CMD_GET_LED;   // 0x0D
+    cmd_frame[4] = 0x00;                 // LEN = 0 (no data)
+
+    // Calculate checksum
+    uint8_t sum = 0;
+    for (int i = 0; i < 5; i++) {
+        sum += cmd_frame[i];
+    }
+    cmd_frame[5] = sum;
+
+    int written = uart_write_bytes(CH9329_UART_NUM, cmd_frame, 6);
+    if (written != 6) {
+        ESP_LOGE(TAG, "Failed to send GET_LED_STATUS");
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
 }

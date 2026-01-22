@@ -36,7 +36,10 @@
 #define CH9329_CMD_MOUSE_REL    0x05    // Relative mouse movement
 #define CH9329_CMD_READ_CFG     0x08    // Read configuration
 #define CH9329_CMD_WRITE_CFG    0x09    // Write configuration
-#define CH9329_CMD_RESPONSE     0x81    // Response from chip
+#define CH9329_CMD_RESPONSE     0x81    // Response from chip (GET_INFO)
+#define CH9329_CMD_KB_ACK       0x82    // Keyboard command ACK
+#define CH9329_CMD_GET_LED      0x0D    // Get LED status
+#define CH9329_CMD_LED_RESPONSE 0x8D    // LED status response
 
 // Keyboard report size (standard USB HID)
 #define CH9329_KB_REPORT_SIZE   8
@@ -127,5 +130,15 @@ esp_err_t ch9329_start_rx_task(void);
  * @brief Stop UART RX task
  */
 void ch9329_stop_rx_task(void);
+
+/**
+ * @brief Request LED status from CH9329
+ *
+ * Sends GET_LED_STATUS command (0x0D) to CH9329.
+ * Response will be received asynchronously via the LED callback.
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t ch9329_request_led_status(void);
 
 #endif /* CH9329_H */
