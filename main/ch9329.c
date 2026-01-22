@@ -308,8 +308,6 @@ static void parse_rx_frame(const uint8_t *data, size_t len)
 
 /**
  * @brief UART RX task for receiving LED status from CH9329
- *
- * Also periodically polls LED status since CH9329 doesn't push it automatically.
  */
 static void uart_rx_task(void *pvParameters)
 {
@@ -318,7 +316,6 @@ static void uart_rx_task(void *pvParameters)
 
     uint8_t rx_buffer[64];
     size_t rx_pos = 0;
-    int poll_counter = 0;
 
     while (s_rx_task_running) {
         // Read available data (100ms timeout)
@@ -375,13 +372,6 @@ static void uart_rx_task(void *pvParameters)
             if (rx_pos >= sizeof(rx_buffer) - 16) {
                 rx_pos = 0;
             }
-        }
-
-        // Poll LED status every ~500ms (5 * 100ms timeout)
-        poll_counter++;
-        if (poll_counter >= 5) {
-            poll_counter = 0;
-            ch9329_request_led_status();
         }
     }
 
