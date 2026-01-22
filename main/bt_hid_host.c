@@ -99,7 +99,7 @@ static void set_state(bt_hid_state_t new_state)
     }
 
     if (s_state != new_state) {
-        ESP_LOGI(TAG, "State: %d -> %d", s_state, new_state);
+        ESP_LOGD(TAG, "State: %d -> %d", s_state, new_state);
         s_state = new_state;
 
         if (s_state_cb) {
@@ -196,17 +196,8 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
     }
 
     case ESP_HIDH_INPUT_EVENT: {
-        // Log all input events for debugging
-        ESP_LOGI(TAG, "INPUT: usage=%s map=%u id=%u len=%d",
-                 esp_hid_usage_str(param->input.usage),
-                 param->input.map_index,
-                 param->input.report_id,
-                 param->input.length);
-        ESP_LOG_BUFFER_HEX(TAG, param->input.data, param->input.length);
-
         // Process HID input report
         // Standard keyboard report: 8 bytes (modifier, reserved, 6 keycodes)
-        // Accept if usage is KEYBOARD or if it looks like a keyboard report (8 bytes)
         esp_hid_usage_t usage = param->input.usage;
         bool is_keyboard_report = (usage == ESP_HID_USAGE_KEYBOARD) ||
                                    (param->input.length == 8);
@@ -218,7 +209,7 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
     }
 
     case ESP_HIDH_BATTERY_EVENT: {
-        ESP_LOGI(TAG, "Battery: %d%%", param->battery.level);
+        ESP_LOGD(TAG, "Battery: %d%%", param->battery.level);
         break;
     }
 
@@ -308,7 +299,7 @@ static bool try_direct_connect(void)
 
     char addr_str[18];
     storage_bd_addr_to_str(s_target_addr, addr_str);
-    ESP_LOGI(TAG, "Direct connect to %s (BLE=%d, addr_type=%d)",
+    ESP_LOGD(TAG, "Direct connect to %s (BLE=%d, addr_type=%d)",
              addr_str, s_target_is_ble, s_target_addr_type);
 
     set_state(BT_HID_STATE_CONNECTING);
@@ -391,10 +382,10 @@ static void hid_task(void *pvParameters)
 
         // Handle direct connection (reconnection without scan)
         if (direct_mode && s_has_target) {
-            ESP_LOGI(TAG, "Attempting direct reconnection (attempt %d)...", reconnect_attempt + 1);
+            ESP_LOGD(TAG, "Direct reconnect attempt %d", reconnect_attempt + 1);
 
             if (try_direct_connect()) {
-                ESP_LOGI(TAG, "Direct connection successful!");
+                ESP_LOGI(TAG, "Connected");
                 reconnect_attempt = 0;
                 was_connected = true;
                 continue;
@@ -406,7 +397,7 @@ static void hid_task(void *pvParameters)
             // After several failed direct attempts, try scanning
             if (reconnect_attempt >= 3 && !was_connected) {
                 // If we've never connected before, fall back to scan
-                ESP_LOGI(TAG, "Direct connection failed, falling back to scan");
+                ESP_LOGD(TAG, "Falling back to scan");
                 cmd = HID_CMD_SCAN_TARGET;
                 direct_mode = false;
             } else {
@@ -427,8 +418,7 @@ static void hid_task(void *pvParameters)
         size_t num_results = 0;
         esp_hid_scan_result_t *results = NULL;
 
-        ESP_LOGI(TAG, "Starting scan (%s mode)...",
-                 pairing_mode ? "pairing" : "reconnect");
+        ESP_LOGD(TAG, "Scanning (%s)...", pairing_mode ? "pairing" : "reconnect");
 
         esp_err_t ret = esp_hid_scan(SCAN_DURATION_SECONDS, &num_results, &results);
 
@@ -440,12 +430,10 @@ static void hid_task(void *pvParameters)
             continue;
         }
 
-        ESP_LOGI(TAG, "Scan complete: %u devices found", num_results);
+        ESP_LOGD(TAG, "Scan: %u devices", num_results);
 
         if (num_results == 0) {
-            ESP_LOGW(TAG, "No HID devices found");
             set_state(BT_HID_STATE_IDLE);
-            // Short delay before retry (will attempt direct connect next)
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
@@ -454,7 +442,6 @@ static void hid_task(void *pvParameters)
         esp_hid_scan_result_t *target = find_best_device(results, num_results, pairing_mode);
 
         if (target == NULL) {
-            ESP_LOGW(TAG, "No suitable device found");
             esp_hid_scan_results_free(results);
             set_state(BT_HID_STATE_IDLE);
             vTaskDelay(pdMS_TO_TICKS(500));
@@ -462,10 +449,7 @@ static void hid_task(void *pvParameters)
         }
 
         // Connect to device
-        char addr_str[18];
-        storage_bd_addr_to_str(target->bda, addr_str);
-        ESP_LOGI(TAG, "Connecting to %s (%s)...",
-                 addr_str, target->name ? target->name : "unknown");
+        ESP_LOGD(TAG, "Connecting to %s", target->name ? target->name : "device");
 
         set_state(BT_HID_STATE_CONNECTING);
 
@@ -499,7 +483,7 @@ static void hid_task(void *pvParameters)
 
             // Save to NVS
             storage_save_paired_device(&new_device);
-            ESP_LOGI(TAG, "Saved paired device: %s", addr_str);
+            ESP_LOGI(TAG, "Paired: %s", target->name ? target->name : "device");
         }
 
         esp_hid_scan_results_free(results);
@@ -512,11 +496,11 @@ static void hid_task(void *pvParameters)
         }
 
         if (get_state() == BT_HID_STATE_CONNECTED) {
-            ESP_LOGI(TAG, "Connection established!");
+            ESP_LOGI(TAG, "Connected");
             reconnect_attempt = 0;
             was_connected = true;
         } else {
-            ESP_LOGW(TAG, "Connection timeout or failed");
+            ESP_LOGD(TAG, "Connect timeout");
             set_state(BT_HID_STATE_IDLE);
             reconnect_attempt++;
         }
@@ -775,22 +759,8 @@ esp_err_t bt_hid_host_send_led_status(uint8_t led_status)
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGI(TAG, "Sending LED status: 0x%02X (Num=%d Caps=%d Scroll=%d)",
-             led_status,
-             (led_status & 0x01) ? 1 : 0,
-             (led_status & 0x02) ? 1 : 0,
-             (led_status & 0x04) ? 1 : 0);
-
-    // Send output report to keyboard
-    // For keyboard LED, report_id is typically 0, map_index is 0
-    // LED status is 1 byte
-    esp_err_t ret = esp_hidh_dev_output_set(s_connected_dev, 0, 0, &led_status, 1);
-
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to send LED status: %s", esp_err_to_name(ret));
-    }
-
-    return ret;
+    // Send output report to keyboard (report_id=0, map_index=0)
+    return esp_hidh_dev_output_set(s_connected_dev, 0, 0, &led_status, 1);
 }
 
 esp_err_t bt_hid_host_connect_direct(const esp_bd_addr_t target_addr, bool is_ble, uint8_t addr_type)
@@ -799,9 +769,7 @@ esp_err_t bt_hid_host_connect_direct(const esp_bd_addr_t target_addr, bool is_bl
         return ESP_ERR_INVALID_STATE;
     }
 
-    bt_hid_state_t state = get_state();
-    if (state == BT_HID_STATE_CONNECTED) {
-        ESP_LOGW(TAG, "Already connected");
+    if (get_state() == BT_HID_STATE_CONNECTED) {
         return ESP_OK;
     }
 
@@ -811,10 +779,6 @@ esp_err_t bt_hid_host_connect_direct(const esp_bd_addr_t target_addr, bool is_bl
         s_target_is_ble = is_ble;
         s_target_addr_type = addr_type;
         s_has_target = true;
-
-        char addr_str[18];
-        storage_bd_addr_to_str(s_target_addr, addr_str);
-        ESP_LOGI(TAG, "Direct connecting to: %s (BLE=%d)", addr_str, is_ble);
     }
 
     // Signal task to do direct connect
@@ -835,17 +799,12 @@ void bt_hid_host_set_target(const esp_bd_addr_t target_addr, bool is_ble, uint8_
     s_target_is_ble = is_ble;
     s_target_addr_type = addr_type;
     s_has_target = true;
-
-    char addr_str[18];
-    storage_bd_addr_to_str(s_target_addr, addr_str);
-    ESP_LOGI(TAG, "Target device set: %s (BLE=%d, addr_type=%d)", addr_str, is_ble, addr_type);
 }
 
 void bt_hid_host_clear_target(void)
 {
     s_has_target = false;
     memset(s_target_addr, 0, sizeof(esp_bd_addr_t));
-    ESP_LOGI(TAG, "Target device cleared");
 }
 
 bool bt_hid_host_has_target(void)

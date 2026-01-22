@@ -112,13 +112,10 @@ static void button_event_task(void *pvParameters)
  */
 static void on_led_status(uint8_t led_status)
 {
-    ESP_LOGI(TAG, "LED status received from CH9329: 0x%02X", led_status);
+    ESP_LOGD(TAG, "LED status received: 0x%02X", led_status);
 
     // Forward LED status to BT keyboard
-    esp_err_t ret = bt_hid_host_send_led_status(led_status);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "Failed to send LED status to keyboard: %s", esp_err_to_name(ret));
-    }
+    bt_hid_host_send_led_status(led_status);
 }
 
 // USB HID key codes for LED-related keys
@@ -197,29 +194,22 @@ static void on_bt_state_change(bt_hid_state_t state)
 {
     switch (state) {
     case BT_HID_STATE_IDLE:
-        ESP_LOGI(TAG, "BT: Idle");
         led_status_set(LED_STATUS_IDLE);
         break;
     case BT_HID_STATE_SCANNING:
-        ESP_LOGI(TAG, "BT: Scanning...");
         led_status_set(LED_STATUS_SCANNING);
         break;
     case BT_HID_STATE_CONNECTING:
-        ESP_LOGI(TAG, "BT: Connecting...");
         led_status_set(LED_STATUS_CONNECTING);
         break;
     case BT_HID_STATE_CONNECTED:
-        ESP_LOGI(TAG, "BT: Connected!");
         led_status_set(LED_STATUS_CONNECTED);
-        // Ensure keys are released on new connection
         ch9329_release_all_keys();
         break;
     case BT_HID_STATE_PAIRING:
-        ESP_LOGI(TAG, "BT: Pairing mode");
         led_status_set(LED_STATUS_PAIRING);
         break;
     case BT_HID_STATE_ERROR:
-        ESP_LOGW(TAG, "BT: Error");
         led_status_set(LED_STATUS_ERROR);
         break;
     }
@@ -387,13 +377,7 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(30000));
 
         bt_hid_state_t state = bt_hid_host_get_state();
-        if (state == BT_HID_STATE_CONNECTED) {
-            ESP_LOGI(TAG, "Status: Connected");
-        } else {
-            ESP_LOGI(TAG, "Status: %d (not connected)", state);
-        }
-
-        // Print free heap for debugging
-        ESP_LOGD(TAG, "Free heap: %lu bytes", esp_get_free_heap_size());
+        // Periodic status check (silent unless debugging)
+        ESP_LOGD(TAG, "Status: %d, Heap: %lu", state, esp_get_free_heap_size());
     }
 }

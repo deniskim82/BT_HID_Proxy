@@ -293,7 +293,7 @@ static void parse_rx_frame(const uint8_t *data, size_t len)
         if (led_status != s_last_led_status) {
             s_last_led_status = led_status;
 
-            ESP_LOGI(TAG, "LED status: 0x%02X (Num=%d Caps=%d Scroll=%d)",
+            ESP_LOGD(TAG, "LED status: 0x%02X (Num=%d Caps=%d Scroll=%d)",
                      led_status,
                      (led_status & 0x01) ? 1 : 0,
                      (led_status & 0x02) ? 1 : 0,
