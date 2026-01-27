@@ -261,19 +261,29 @@ static void parse_rx_frame(const uint8_t *data, size_t len)
 {
     // Minimum frame size: header(2) + addr(1) + cmd(1) + len(1) + checksum(1) = 6
     if (len < 6) {
+        ESP_LOGW(TAG, "Frame too short: %d bytes (min 6)", (int)len);
         return;
     }
 
     // Verify header
     if (data[0] != CH9329_HEADER_1 || data[1] != CH9329_HEADER_2) {
+        ESP_LOGW(TAG, "Invalid header: 0x%02X 0x%02X (expected 0x57 0xAB)", data[0], data[1]);
         return;
     }
 
+    uint8_t addr = data[2];
     uint8_t cmd = data[3];
     uint8_t data_len = data[4];
 
+    // Log all received frames (except keyboard ACK which is too frequent)
+    if (cmd != CH9329_CMD_KB_ACK) {
+        ESP_LOGI(TAG, "RX frame: ADDR=0x%02X CMD=0x%02X LEN=%d", addr, cmd, data_len);
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, len, ESP_LOG_INFO);
+    }
+
     // Sanity check data_len to prevent issues
     if (data_len > 64 || len < (size_t)(5 + data_len + 1)) {
+        ESP_LOGW(TAG, "Invalid data_len: %d (frame_len=%d)", data_len, (int)len);
         return;
     }
 
@@ -282,27 +292,33 @@ static void parse_rx_frame(const uint8_t *data, size_t len)
         return;
     }
 
-    // Log non-ACK frames at DEBUG level
-    ESP_LOGD(TAG, "RX frame: CMD=0x%02X LEN=%d", cmd, data_len);
-
     // Check for LED status response (0x8D)
     if (cmd == CH9329_CMD_LED_RESPONSE && data_len >= 1) {
         uint8_t led_status = data[5];
+
+        ESP_LOGI(TAG, "LED response: 0x%02X (Num=%d Caps=%d Scroll=%d) last=0x%02X",
+                 led_status,
+                 (led_status & 0x01) ? 1 : 0,
+                 (led_status & 0x02) ? 1 : 0,
+                 (led_status & 0x04) ? 1 : 0,
+                 s_last_led_status);
 
         // Only process if changed
         if (led_status != s_last_led_status) {
             s_last_led_status = led_status;
 
-            ESP_LOGD(TAG, "LED status: 0x%02X (Num=%d Caps=%d Scroll=%d)",
-                     led_status,
-                     (led_status & 0x01) ? 1 : 0,
-                     (led_status & 0x02) ? 1 : 0,
-                     (led_status & 0x04) ? 1 : 0);
-
             if (s_led_callback) {
+                ESP_LOGI(TAG, "Calling LED callback with status 0x%02X", led_status);
                 s_led_callback(led_status);
+            } else {
+                ESP_LOGW(TAG, "LED callback not registered!");
             }
+        } else {
+            ESP_LOGI(TAG, "LED status unchanged, skipping callback");
         }
+    } else if (cmd != CH9329_CMD_KB_ACK) {
+        // Log other unexpected commands
+        ESP_LOGI(TAG, "Unhandled CMD: 0x%02X (known: KB_ACK=0x82, LED=0x8D)", cmd);
     }
 }
 
@@ -316,6 +332,7 @@ static void uart_rx_task(void *pvParameters)
 
     uint8_t rx_buffer[64];
     size_t rx_pos = 0;
+    uint32_t total_bytes_received = 0;  // Debug counter
 
     while (s_rx_task_running) {
         // Read available data (100ms timeout)
@@ -324,6 +341,12 @@ static void uart_rx_task(void *pvParameters)
                                   pdMS_TO_TICKS(100));
 
         if (len > 0) {
+            total_bytes_received += len;
+            // Log raw received data for debugging
+            ESP_LOGI(TAG, "UART RX: %d bytes (total=%lu), pos=%d, raw:",
+                     len, (unsigned long)total_bytes_received, (int)rx_pos);
+            ESP_LOG_BUFFER_HEX_LEVEL(TAG, &rx_buffer[rx_pos], len, ESP_LOG_INFO);
+
             rx_pos += len;
 
             // Try to find and parse complete frames
@@ -427,6 +450,7 @@ void ch9329_stop_rx_task(void)
 esp_err_t ch9329_request_led_status(void)
 {
     if (!s_initialized) {
+        ESP_LOGW(TAG, "request_led_status: not initialized");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -446,11 +470,15 @@ esp_err_t ch9329_request_led_status(void)
     }
     cmd_frame[5] = sum;
 
+    ESP_LOGI(TAG, "Sending GET_LED_STATUS request:");
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, cmd_frame, 6, ESP_LOG_INFO);
+
     int written = uart_write_bytes(CH9329_UART_NUM, cmd_frame, 6);
     if (written != 6) {
-        ESP_LOGE(TAG, "Failed to send GET_LED_STATUS");
+        ESP_LOGE(TAG, "Failed to send GET_LED_STATUS: wrote %d/6 bytes", written);
         return ESP_FAIL;
     }
 
+    ESP_LOGI(TAG, "GET_LED_STATUS sent successfully");
     return ESP_OK;
 }

@@ -112,10 +112,19 @@ static void button_event_task(void *pvParameters)
  */
 static void on_led_status(uint8_t led_status)
 {
-    ESP_LOGD(TAG, "LED status received: 0x%02X", led_status);
+    ESP_LOGI(TAG, "on_led_status callback: 0x%02X (Num=%d Caps=%d Scroll=%d)",
+             led_status,
+             (led_status & 0x01) ? 1 : 0,
+             (led_status & 0x02) ? 1 : 0,
+             (led_status & 0x04) ? 1 : 0);
 
     // Forward LED status to BT keyboard
-    bt_hid_host_send_led_status(led_status);
+    esp_err_t ret = bt_hid_host_send_led_status(led_status);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to send LED status to BT: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "LED status forwarded to BT keyboard successfully");
+    }
 }
 
 // USB HID key codes for LED-related keys
@@ -173,9 +182,12 @@ static void on_keyboard_input(const uint8_t *data)
     // Check if LED-related key was just pressed
     const uint8_t *curr_keys = &data[2];  // keys start at offset 2
     if (led_key_pressed(curr_keys, s_prev_keys)) {
+        ESP_LOGI(TAG, "LED key pressed detected (Caps=0x%02X, Num=0x%02X, Scroll=0x%02X)",
+                 HID_KEY_CAPS_LOCK, HID_KEY_NUM_LOCK, HID_KEY_SCROLL_LOCK);
         // Request LED status after short delay for PC to process
         // The delay happens naturally as CH9329 processes the key and PC responds
         vTaskDelay(pdMS_TO_TICKS(50));
+        ESP_LOGI(TAG, "Requesting LED status from CH9329...");
         ch9329_request_led_status();
     }
 
