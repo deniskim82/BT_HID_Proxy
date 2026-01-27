@@ -755,12 +755,32 @@ esp_err_t bt_hid_host_get_connected_device(esp_bd_addr_t bd_addr, bool *is_ble)
 
 esp_err_t bt_hid_host_send_led_status(uint8_t led_status)
 {
-    if (!s_initialized || s_connected_dev == NULL) {
+    if (!s_initialized) {
+        ESP_LOGW(TAG, "send_led_status: not initialized");
         return ESP_ERR_INVALID_STATE;
     }
 
+    if (s_connected_dev == NULL) {
+        ESP_LOGW(TAG, "send_led_status: no connected device");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Sending LED status 0x%02X to BT device (Num=%d Caps=%d Scroll=%d)",
+             led_status,
+             (led_status & 0x01) ? 1 : 0,
+             (led_status & 0x02) ? 1 : 0,
+             (led_status & 0x04) ? 1 : 0);
+
     // Send output report to keyboard (report_id=0, map_index=0)
-    return esp_hidh_dev_output_set(s_connected_dev, 0, 0, &led_status, 1);
+    esp_err_t ret = esp_hidh_dev_output_set(s_connected_dev, 0, 0, &led_status, 1);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_hidh_dev_output_set failed: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "LED status sent to BT device successfully");
+    }
+
+    return ret;
 }
 
 esp_err_t bt_hid_host_connect_direct(const esp_bd_addr_t target_addr, bool is_ble, uint8_t addr_type)
