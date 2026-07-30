@@ -1,5 +1,6 @@
 # BT HID Proxy - SDK Configuration Defaults
 # Target: M5Stamp Pico (ESP32-PICO-D4)
+# BLE-only rewrite: NimBLE host, Bluedroid and BT Classic removed.
 
 # -----------------------------------
 # Target Selection
@@ -14,87 +15,44 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 
 # -----------------------------------
-# Bluetooth Configuration
+# Bluetooth: NimBLE, BLE-only controller
 # -----------------------------------
 CONFIG_BT_ENABLED=y
-CONFIG_BT_BLUEDROID_ENABLED=y
-CONFIG_BT_CLASSIC_ENABLED=y
-CONFIG_BT_BLE_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=n
+CONFIG_BT_NIMBLE_ENABLED=y
 
-# HID Host support
-CONFIG_BT_HID_HOST_ENABLED=y
-CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
-
-# Dual mode (Classic + BLE)
-CONFIG_BTDM_CTRL_MODE_BTDM=y
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
 CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=n
-CONFIG_BTDM_CTRL_MODE_BLE_ONLY=n
+CONFIG_BTDM_CTRL_MODE_BTDM=n
+CONFIG_BTDM_CTRL_BLE_MAX_CONN=1
 
-# Bluetooth controller settings
-CONFIG_BTDM_CTRL_BR_EDR_SCO_DATA_PATH_EFF=0
-CONFIG_BTDM_CTRL_PCM_ROLE_EFF=0
-CONFIG_BTDM_CTRL_PCM_POLAR_EFF=0
-CONFIG_BTDM_CTRL_BLE_MAX_CONN=3
-CONFIG_BTDM_CTRL_BR_EDR_MAX_ACL_CONN=2
-CONFIG_BTDM_CTRL_BR_EDR_MAX_SYNC_CONN=0
+# Central-only host: no advertising, no peripheral role
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
 
-# Security settings
-CONFIG_BT_SSP_ENABLED=y
-CONFIG_BT_BLE_SMP_ENABLE=y
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_MAX_BONDS=5
+CONFIG_BT_NIMBLE_MAX_CCCDS=16
 
-# GAP configuration
-CONFIG_BT_GAP_ENABLED=y
-CONFIG_BT_GATTC_ENABLE=y
+# Persist bonds (LTK/IRK) in NVS so reconnection after power cycle works
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
 
-# GATT Client - increase notification registration limit
-# Default is 5, but complex keyboards like Keychron K5 Max have 7+ input reports
-CONFIG_BT_GATTC_NOTIF_REG_MAX=15
-
-# HID configuration
-CONFIG_BT_HID_ENABLED=y
+# Security Manager: legacy + secure connections
+CONFIG_BT_NIMBLE_SM_LEGACY=y
+CONFIG_BT_NIMBLE_SM_SC=y
 
 # -----------------------------------
-# NVS Flash Configuration
-# -----------------------------------
-CONFIG_NVS_ENCRYPTION=n
-
-# -----------------------------------
-# FreeRTOS Configuration
+# FreeRTOS
 # -----------------------------------
 CONFIG_FREERTOS_HZ=1000
 
-# Increase Timer Service task stack to prevent overflow
-# Default is 2048 bytes, which can be insufficient if timer callbacks
-# indirectly trigger BT/BLE operations. We use a dedicated task for
-# heavy operations, but increase this as additional safety.
-CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
-
 # -----------------------------------
-# Log Level
+# Logging
 # -----------------------------------
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_DEFAULT_LEVEL=3
-
-# BT logging - set to WARNING for normal operation
-# Change to DEBUG if troubleshooting is needed
-CONFIG_BT_LOG_HCI_TRACE_LEVEL_WARNING=y
-CONFIG_BT_LOG_BTM_TRACE_LEVEL_WARNING=y
-CONFIG_BT_LOG_L2CAP_TRACE_LEVEL_WARNING=y
-CONFIG_BT_LOG_GAP_TRACE_LEVEL_WARNING=y
-CONFIG_BT_LOG_HID_TRACE_LEVEL_WARNING=y
-CONFIG_BT_LOG_GATT_TRACE_LEVEL_WARNING=y
-CONFIG_BT_LOG_SMP_TRACE_LEVEL_WARNING=y
-
-# -----------------------------------
-# Memory Optimization
-# -----------------------------------
-CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=n
-CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=n
-
-# -----------------------------------
-# UART Configuration
-# -----------------------------------
-CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 
 # -----------------------------------
 # Watchdog

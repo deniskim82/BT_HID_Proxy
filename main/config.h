@@ -1,8 +1,9 @@
 /**
  * @file config.h
- * @brief Global configuration for BT HID Proxy
+ * @brief Global configuration for BT HID Proxy (BLE-only rewrite)
  *
  * Hardware: M5Stamp Pico (ESP32-PICO-D4)
+ * All pin mappings and UART settings are unchanged from the original design.
  */
 
 #ifndef CONFIG_H
@@ -10,13 +11,6 @@
 
 #include "driver/gpio.h"
 #include "driver/uart.h"
-
-/* ============================================================================
- * Debug Configuration
- * ============================================================================ */
-
-// Set to 1 to enable verbose debug logging (affects performance)
-#define DEBUG_VERBOSE           0
 
 /* ============================================================================
  * Hardware Pin Configuration (M5Stamp Pico)
@@ -31,7 +25,7 @@
 // Built-in button on M5Stamp Pico
 #define BUTTON_GPIO             GPIO_NUM_39
 
-// RGB LED (SK6812) - Reserved for future use
+// RGB LED (SK6812)
 #define RGB_LED_GPIO            GPIO_NUM_27
 
 /* ============================================================================
@@ -41,56 +35,45 @@
 // Button long press threshold for pairing mode (milliseconds)
 #define BUTTON_LONG_PRESS_MS    5000
 
-// BT scan timeout (seconds)
-#define BT_SCAN_TIMEOUT_SEC     10
+// Pairing scan window (seconds) - collect candidates, then connect to best RSSI
+#define BLE_PAIRING_SCAN_SEC    6
 
-// BT connection timeout (milliseconds)
-#define BT_CONNECT_TIMEOUT_MS   15000
+// Reconnect: scan-for-advertisement window (seconds)
+#define BLE_RECONNECT_SCAN_SEC  8
 
-// RSSI threshold for pairing mode (-70 dBm = nearby device)
-// Lower values (e.g., -80) = farther devices allowed
-// Higher values (e.g., -50) = only very close devices
-#define BT_PAIRING_RSSI_THRESHOLD   -70
+// Reconnect: direct connection attempt timeout (milliseconds)
+#define BLE_DIRECT_CONNECT_TIMEOUT_MS  4000
 
-// Connection retry delay (milliseconds)
-#define BT_RETRY_DELAY_MS       3000
+// Delay between reconnect cycles (milliseconds)
+#define BLE_RECONNECT_DELAY_MS  500
 
-// Static passkey for BLE pairing (6 digits)
-// When pairing with a BLE keyboard, enter this code on the keyboard
-// Set to 0 to disable static passkey (random passkey will be shown in log)
-#define BT_BLE_STATIC_PASSKEY   123456
+// Delay after connecting before polling initial LED state (milliseconds)
+#define LED_POLL_AFTER_CONNECT_MS   300
 
-// PIN code for Classic BT pairing (4 characters)
-// Most Classic BT keyboards use "0000" or "1234"
-#define BT_CLASSIC_PIN_CODE     "0000"
-
-// Key release timeout - auto-release all keys if no input (milliseconds)
-#define KEY_RELEASE_TIMEOUT_MS  100
+// Delay after a Caps/Num/Scroll key press before polling LED state (milliseconds)
+#define LED_POLL_AFTER_KEY_MS       100
 
 /* ============================================================================
  * Bluetooth Configuration
  * ============================================================================ */
 
-// Device name for BT discovery
-#define BT_DEVICE_NAME          "BT_HID_Proxy"
+// Static passkey shown when a keyboard requires Passkey Entry pairing.
+// Type this number on the keyboard when pairing.
+#define BLE_STATIC_PASSKEY      123456
 
-// Maximum stored paired devices
-#define MAX_PAIRED_DEVICES      1
+// Minimum RSSI to accept a keyboard in pairing mode (dBm)
+#define BLE_PAIRING_RSSI_MIN    (-80)
 
 /* ============================================================================
  * CH9329 Configuration
  * ============================================================================ */
-
-// Frame buffer size
-#define CH9329_FRAME_BUF_SIZE   64
 
 // ESP32 UART buffer sizes for CH9329 communication
 // Note: RX buffer must be > SOC_UART_FIFO_LEN (128 bytes on ESP32)
 #define CH9329_UART_TX_BUF_SIZE 512
 #define CH9329_UART_RX_BUF_SIZE 256
 
-// Pre-computed checksum base for keyboard frame header
-// Header: 0x57 + 0xAB + 0x00 + 0x02 + 0x08 = 0x0C
-#define CH9329_KB_HEADER_CHECKSUM_BASE  0x0C
+// Depth of the TX message queue (keyboard reports + control commands)
+#define CH9329_TX_QUEUE_LEN     32
 
 #endif /* CONFIG_H */

@@ -1,8 +1,8 @@
 idf_component_register(
     SRCS
         "main.c"
-        "bt_hid_host.c"
-        "esp_hid_gap.c"
+        "ble_hid_host.c"
+        "hid_parser.c"
         "ch9329.c"
         "storage.c"
         "button.c"
@@ -13,5 +13,4 @@ idf_component_register(
         nvs_flash
         driver
         esp_timer
-        esp_hid
 )
