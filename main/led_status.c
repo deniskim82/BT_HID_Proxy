@@ -4,13 +4,17 @@
  *
  * Uses RMT peripheral to drive SK6812/WS2812 addressable LED.
  *
- * Status patterns:
- * - IDLE:       Slow red blink (1s period)
- * - SCANNING:   Fast blue blink (200ms period)
- * - PAIRING:    Blue/green alternating (500ms each)
- * - CONNECTING: Slow green blink (1s period)
- * - CONNECTED:  Solid green
- * - ERROR:      Fast red blink (100ms period)
+ * Status patterns (color = meaning, speed = urgency):
+ * - IDLE:       Slow amber blink (no pairing stored)
+ * - SCANNING:   Slow blue blink (looking for the bonded keyboard)
+ * - PAIRING:    Fast blue blink (discoverable, actively pairing)
+ * - CONNECTING: Solid blue (link being established)
+ * - CONNECTED:  Solid dim green
+ * - ERROR:      Fast red blink
+ *
+ * Red is reserved exclusively for errors; blue means Bluetooth activity,
+ * with blink speed indicating pairing (fast) vs reconnect scan (slow).
+ * Brightness is kept low (<=64) - this LED sits on a desk.
  */
 
 #include "led_status.h"
@@ -211,36 +215,27 @@ static void blink_timer_callback(TimerHandle_t timer)
 
     switch (s_current_mode) {
     case LED_STATUS_IDLE:
-        // Slow red blink
+        // Slow amber blink
         if (s_blink_state) {
-            set_led_color(64, 0, 0);  // Dim red
+            set_led_color(48, 24, 0);
         } else {
             set_led_color(0, 0, 0);
         }
         break;
 
     case LED_STATUS_SCANNING:
-        // Fast blue blink
+        // Slow blue blink
         if (s_blink_state) {
-            set_led_color(0, 0, 128);  // Blue
+            set_led_color(0, 0, 64);
         } else {
             set_led_color(0, 0, 0);
         }
         break;
 
     case LED_STATUS_PAIRING:
-        // Blue/green alternating
+        // Fast blue blink
         if (s_blink_state) {
-            set_led_color(0, 0, 128);  // Blue
-        } else {
-            set_led_color(0, 128, 0);  // Green
-        }
-        break;
-
-    case LED_STATUS_CONNECTING:
-        // Slow green blink
-        if (s_blink_state) {
-            set_led_color(0, 64, 0);  // Dim green
+            set_led_color(0, 0, 64);
         } else {
             set_led_color(0, 0, 0);
         }
@@ -249,7 +244,7 @@ static void blink_timer_callback(TimerHandle_t timer)
     case LED_STATUS_ERROR:
         // Fast red blink
         if (s_blink_state) {
-            set_led_color(255, 0, 0);  // Bright red
+            set_led_color(64, 0, 0);
         } else {
             set_led_color(0, 0, 0);
         }
@@ -276,20 +271,21 @@ static void update_blink_timer(void)
         period_ms = 500;  // 1s total period (500ms on, 500ms off)
         break;
     case LED_STATUS_SCANNING:
-        period_ms = 100;  // 200ms total period
-        break;
-    case LED_STATUS_PAIRING:
-        period_ms = 500;  // 500ms each color
-        break;
-    case LED_STATUS_CONNECTING:
         period_ms = 500;  // 1s total period
         break;
-    case LED_STATUS_ERROR:
-        period_ms = 50;   // 100ms total period
+    case LED_STATUS_PAIRING:
+        period_ms = 100;  // 200ms total period
         break;
+    case LED_STATUS_ERROR:
+        period_ms = 100;  // 200ms total period
+        break;
+    case LED_STATUS_CONNECTING:
+        // Solid blue - no blinking
+        set_led_color(0, 0, 64);
+        return;
     case LED_STATUS_CONNECTED:
-        // Solid - no blinking needed
-        set_led_color(0, 128, 0);  // Green
+        // Solid dim green - no blinking
+        set_led_color(0, 32, 0);
         return;
     case LED_STATUS_OFF:
     default:

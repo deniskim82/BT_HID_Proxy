@@ -17,11 +17,11 @@
 
 typedef enum {
     LED_STATUS_OFF = 0,
-    LED_STATUS_IDLE,        // Slow red blink
-    LED_STATUS_SCANNING,    // Fast blue blink
-    LED_STATUS_PAIRING,     // Blue/green alternating
-    LED_STATUS_CONNECTING,  // Slow green blink
-    LED_STATUS_CONNECTED,   // Solid green
+    LED_STATUS_IDLE,        // Slow amber blink (no pairing stored)
+    LED_STATUS_SCANNING,    // Slow blue blink (searching bonded keyboard)
+    LED_STATUS_PAIRING,     // Fast blue blink (pairing mode)
+    LED_STATUS_CONNECTING,  // Solid blue
+    LED_STATUS_CONNECTED,   // Solid dim green
     LED_STATUS_ERROR,       // Fast red blink
 } led_status_mode_t;
 

@@ -1,0 +1,67 @@
+/**
+ * @file ble_hid_host.h
+ * @brief BLE HID (HOGP) Host based on NimBLE
+ *
+ * Connects to a bonded BLE keyboard, parses its HID report map, subscribes
+ * only to the keyboard input report, and delivers translated 8-byte boot
+ * reports via callback. Supports LED (Caps/Num/Scroll) output forwarding.
+ */
+
+#ifndef BLE_HID_HOST_H
+#define BLE_HID_HOST_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "esp_err.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+    BLE_HID_STATE_IDLE = 0,     // No bonded device / waiting
+    BLE_HID_STATE_SCANNING,     // Scanning for the bonded keyboard
+    BLE_HID_STATE_CONNECTING,   // Connecting / encrypting / discovering
+    BLE_HID_STATE_CONNECTED,    // Subscribed, relaying input
+    BLE_HID_STATE_PAIRING,      // Pairing mode: scanning for a new keyboard
+    BLE_HID_STATE_ERROR,        // Repeated failures; still retrying
+} ble_hid_state_t;
+
+/**
+ * @brief Keyboard report callback: 8-byte boot report [mod, 0, k1..k6]
+ *
+ * Called from the NimBLE host task; must not block.
+ */
+typedef void (*ble_hid_keyboard_cb_t)(const uint8_t report[8]);
+
+typedef void (*ble_hid_state_cb_t)(ble_hid_state_t state);
+
+/**
+ * @brief Initialize the BLE stack and start the connection manager task.
+ *
+ * If a bonded keyboard is stored in NVS, reconnection starts automatically.
+ * Otherwise the module stays idle until ble_hid_host_start_pairing().
+ */
+esp_err_t ble_hid_host_init(ble_hid_keyboard_cb_t keyboard_cb, ble_hid_state_cb_t state_cb);
+
+/**
+ * @brief Enter pairing mode: scan, connect to the strongest keyboard, bond,
+ *        and replace any previously stored pairing.
+ *
+ * Non-blocking; safe to call from timer context (posts a command).
+ */
+esp_err_t ble_hid_host_start_pairing(void);
+
+/**
+ * @brief Forward host LED state (Bit0=Num, Bit1=Caps, Bit2=Scroll) to the keyboard.
+ */
+esp_err_t ble_hid_host_send_led_status(uint8_t led_status);
+
+ble_hid_state_t ble_hid_host_get_state(void);
+bool ble_hid_host_is_connected(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* BLE_HID_HOST_H */

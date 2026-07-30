@@ -1,6 +1,6 @@
 /**
  * @file storage.h
- * @brief NVS storage for Bluetooth pairing information
+ * @brief NVS storage for BLE pairing information
  */
 
 #ifndef STORAGE_H
@@ -9,71 +9,38 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
-#include "esp_bt_defs.h"
 
-/* ============================================================================
- * Data Structures
- * ============================================================================ */
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /**
- * @brief Paired device information
+ * @brief Stored peer identity
+ *
+ * addr/addr_type follow NimBLE conventions (ble_addr_t equivalent):
+ * addr_type 0 = public, 1 = static random.
  */
 typedef struct {
-    esp_bd_addr_t bd_addr;      // Bluetooth device address (6 bytes)
-    uint8_t addr_type;          // Address type (public/random for BLE)
-    bool is_ble;                // true if BLE, false if Classic BT
-    bool valid;                 // true if entry contains valid data
+    uint8_t addr[6];        // Little-endian, as used by NimBLE
+    uint8_t addr_type;
+    bool valid;
+    char name[32];
 } paired_device_t;
 
-/* ============================================================================
- * Function Declarations
- * ============================================================================ */
-
-/**
- * @brief Initialize NVS storage
- * @return ESP_OK on success
- */
 esp_err_t storage_init(void);
 
-/**
- * @brief Save paired device information
- * @param device Pointer to device info to save
- * @return ESP_OK on success
- */
 esp_err_t storage_save_paired_device(const paired_device_t *device);
-
-/**
- * @brief Load paired device information
- * @param device Pointer to receive device info
- * @return ESP_OK on success, ESP_ERR_NOT_FOUND if no device saved
- */
 esp_err_t storage_load_paired_device(paired_device_t *device);
-
-/**
- * @brief Clear saved paired device
- * @return ESP_OK on success
- */
 esp_err_t storage_clear_paired_device(void);
 
 /**
- * @brief Check if paired device exists in storage
- * @return true if valid paired device exists
+ * @brief Format a NimBLE little-endian address as "AA:BB:CC:DD:EE:FF"
+ * @param str Output buffer, at least 18 bytes
  */
-bool storage_has_paired_device(void);
+void storage_addr_to_str(const uint8_t addr[6], char *str);
 
-/**
- * @brief Get BD address as string (for logging)
- * @param bd_addr Bluetooth device address
- * @param str Output buffer (minimum 18 bytes for "XX:XX:XX:XX:XX:XX\0")
- */
-void storage_bd_addr_to_str(const esp_bd_addr_t bd_addr, char *str);
-
-/**
- * @brief Compare two BD addresses
- * @param addr1 First address
- * @param addr2 Second address
- * @return true if equal
- */
-bool storage_bd_addr_equal(const esp_bd_addr_t addr1, const esp_bd_addr_t addr2);
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* STORAGE_H */

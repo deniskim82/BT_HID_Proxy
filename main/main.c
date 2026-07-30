@@ -1,20 +1,16 @@
 /**
  * @file main.c
- * @brief BT HID Proxy - Bluetooth Keyboard to USB HID Bridge
+ * @brief BT HID Proxy - BLE Keyboard to USB HID Bridge
  *
- * Main application entry point. Coordinates:
- * - Bluetooth HID Host (keyboard input)
- * - CH9329 UART communication (USB HID output)
- * - NVS storage (pairing persistence)
- * - Button handling (pairing mode trigger)
+ * [BLE Keyboard] --(BLE/HOGP)--> [ESP32/NimBLE] --(UART)--> [CH9329] --(USB)--> [PC]
  *
  * Hardware: M5Stamp Pico (ESP32-PICO-D4)
+ *  - CH9329 on UART1: TX=GPIO32, RX=GPIO33, 115200 baud
+ *  - Button: GPIO39 (long-press 5s = pairing mode)
+ *  - RGB LED: GPIO27 (SK6812)
  *
- * Operation:
- * 1. On boot, load last paired device from NVS
- * 2. Scan and connect to paired device
- * 3. Relay keyboard input from BT to USB via CH9329
- * 4. Long-press button (5s) to enter pairing mode
+ * Hot path: BLE notification -> boot report translation -> CH9329 TX queue.
+ * No blocking calls anywhere on that path.
  */
 
 #include <stdio.h>
@@ -23,121 +19,46 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 
 #include "config.h"
 #include "storage.h"
 #include "ch9329.h"
-#include "bt_hid_host.h"
+#include "ble_hid_host.h"
 #include "button.h"
 #include "led_status.h"
 
 static const char *TAG = "MAIN";
 
-/* ============================================================================
- * Private Variables
- * ============================================================================ */
-
-static paired_device_t s_paired_device = {0};
-static bool s_has_paired = false;
-
-// Button event handling task
-static TaskHandle_t s_button_task_handle = NULL;
-
-// Button event queue - used to offload heavy BT operations from timer context
-typedef enum {
-    BUTTON_TASK_EVENT_SHORT_PRESS = 1,
-    BUTTON_TASK_EVENT_LONG_PRESS = 2,
-} button_task_event_t;
-
-/* ============================================================================
- * Button Event Handler Task
- * ============================================================================ */
-
-/**
- * @brief Dedicated task for handling button events
- *
- * This task offloads heavy Bluetooth operations from the Timer Service task
- * context to prevent stack overflow. Button callbacks from timer run in
- * Timer Service task with limited stack (2048 bytes default), which is
- * insufficient for BT API calls that internally allocate large structures.
- */
-static void button_event_task(void *pvParameters)
-{
-    uint32_t notification_value;
-
-    ESP_LOGI(TAG, "Button event handler task started (stack: %d bytes)",
-             CONFIG_ESP_MAIN_TASK_STACK_SIZE);
-
-    while (1) {
-        // Wait for button event notification from timer callback
-        if (xTaskNotifyWait(0, ULONG_MAX, &notification_value, portMAX_DELAY) == pdTRUE) {
-            button_task_event_t event = (button_task_event_t)notification_value;
-
-            switch (event) {
-            case BUTTON_TASK_EVENT_SHORT_PRESS:
-                ESP_LOGI(TAG, "Button: Short press");
-                // Short press - could be used for future features
-                break;
-
-            case BUTTON_TASK_EVENT_LONG_PRESS:
-                ESP_LOGI(TAG, "Button: Long press - entering pairing mode");
-
-                // Release all keys before changing mode
-                ch9329_release_all_keys();
-
-                // Start pairing (heavy BT operation - safe in dedicated task)
-                esp_err_t ret = bt_hid_host_start_pairing();
-                if (ret != ESP_OK) {
-                    ESP_LOGW(TAG, "Failed to start pairing: %s", esp_err_to_name(ret));
-                }
-                break;
-
-            default:
-                ESP_LOGW(TAG, "Unknown button event: %lu", (unsigned long)notification_value);
-                break;
-            }
-        }
-    }
-}
-
-/* ============================================================================
- * Callback Functions
- * ============================================================================ */
-
-/**
- * @brief LED status callback from CH9329 (UART RX)
- *
- * Called when LED status is received from host PC via CH9329.
- * Forwards to connected BT keyboard.
- */
-static void on_led_status(uint8_t led_status)
-{
-    ESP_LOGI(TAG, "on_led_status callback: 0x%02X (Num=%d Caps=%d Scroll=%d)",
-             led_status,
-             (led_status & 0x01) ? 1 : 0,
-             (led_status & 0x02) ? 1 : 0,
-             (led_status & 0x04) ? 1 : 0);
-
-    // Forward LED status to BT keyboard
-    esp_err_t ret = bt_hid_host_send_led_status(led_status);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to send LED status to BT: %s", esp_err_to_name(ret));
-    } else {
-        ESP_LOGI(TAG, "LED status forwarded to BT keyboard successfully");
-    }
-}
-
-// USB HID key codes for LED-related keys
+/* USB HID key codes for LED-related keys */
 #define HID_KEY_CAPS_LOCK    0x39
-#define HID_KEY_NUM_LOCK     0x53
 #define HID_KEY_SCROLL_LOCK  0x47
+#define HID_KEY_NUM_LOCK     0x53
 
-// Track previous key state to detect key press (not release)
+// One-shot timer used to poll the PC's LED state shortly after a lock key
+// press (or after connecting), without ever blocking the input path.
+static esp_timer_handle_t s_led_poll_timer = NULL;
+
 static uint8_t s_prev_keys[6] = {0};
 
-/**
- * @brief Check if a key code is in the key array
- */
+/* ============================================================================
+ * LED state polling
+ * ============================================================================ */
+
+static void led_poll_timer_cb(void *arg)
+{
+    ch9329_request_led_status();
+}
+
+static void schedule_led_poll(uint32_t delay_ms)
+{
+    if (s_led_poll_timer == NULL) {
+        return;
+    }
+    esp_timer_stop(s_led_poll_timer);
+    esp_timer_start_once(s_led_poll_timer, (uint64_t)delay_ms * 1000);
+}
+
 static bool has_key(const uint8_t *keys, uint8_t key_code)
 {
     for (int i = 0; i < 6; i++) {
@@ -148,117 +69,91 @@ static bool has_key(const uint8_t *keys, uint8_t key_code)
     return false;
 }
 
-/**
- * @brief Check if an LED-related key was just pressed (not held or released)
- */
-static bool led_key_pressed(const uint8_t *curr_keys, const uint8_t *prev_keys)
+static bool lock_key_just_pressed(const uint8_t *curr, const uint8_t *prev)
 {
-    // Check if CapsLock, NumLock, or ScrollLock was just pressed
-    const uint8_t led_keys[] = {HID_KEY_CAPS_LOCK, HID_KEY_NUM_LOCK, HID_KEY_SCROLL_LOCK};
+    static const uint8_t lock_keys[] = {
+        HID_KEY_CAPS_LOCK, HID_KEY_NUM_LOCK, HID_KEY_SCROLL_LOCK
+    };
 
-    for (int i = 0; i < 3; i++) {
-        // Key is in current report but not in previous = just pressed
-        if (has_key(curr_keys, led_keys[i]) && !has_key(prev_keys, led_keys[i])) {
+    for (size_t i = 0; i < sizeof(lock_keys); i++) {
+        if (has_key(curr, lock_keys[i]) && !has_key(prev, lock_keys[i])) {
             return true;
         }
     }
     return false;
 }
 
+/* ============================================================================
+ * Callbacks
+ * ============================================================================ */
+
 /**
- * @brief Keyboard input callback from BT HID Host
- *
- * Called when keyboard data is received. Forwards to CH9329.
- * Data format: [modifier, reserved, key1, key2, key3, key4, key5, key6]
+ * @brief Keyboard report from BLE (8-byte boot format). Runs on NimBLE host
+ *        task - keep it non-blocking.
  */
-static void on_keyboard_input(const uint8_t *data)
+static void on_keyboard_report(const uint8_t report[8])
 {
-    // Forward keyboard report to CH9329
-    esp_err_t ret = ch9329_send_keyboard_raw(data);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to send keyboard data: %s", esp_err_to_name(ret));
-    }
+    ch9329_send_keyboard_report(report);
 
-    // Check if LED-related key was just pressed
-    const uint8_t *curr_keys = &data[2];  // keys start at offset 2
-    if (led_key_pressed(curr_keys, s_prev_keys)) {
-        ESP_LOGI(TAG, "LED key pressed detected (Caps=0x%02X, Num=0x%02X, Scroll=0x%02X)",
-                 HID_KEY_CAPS_LOCK, HID_KEY_NUM_LOCK, HID_KEY_SCROLL_LOCK);
-        // Request LED status after short delay for PC to process
-        // The delay happens naturally as CH9329 processes the key and PC responds
-        vTaskDelay(pdMS_TO_TICKS(50));
-        ESP_LOGI(TAG, "Requesting LED status from CH9329...");
-        ch9329_request_led_status();
+    const uint8_t *curr_keys = &report[2];
+    if (lock_key_just_pressed(curr_keys, s_prev_keys)) {
+        schedule_led_poll(LED_POLL_AFTER_KEY_MS);
     }
-
-    // Save current keys for next comparison
     memcpy(s_prev_keys, curr_keys, 6);
-
-    // Debug logging (minimal to reduce latency)
-    ESP_LOGD(TAG, "KB: %02X %02X %02X %02X %02X %02X %02X %02X",
-             data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
 }
 
 /**
- * @brief BT connection state change callback
+ * @brief PC LED state from CH9329 (Bit0=Num, Bit1=Caps, Bit2=Scroll).
+ *        Runs on the CH9329 RX task; forward to the keyboard.
  */
-static void on_bt_state_change(bt_hid_state_t state)
+static void on_pc_led_status(uint8_t led_status)
+{
+    ble_hid_host_send_led_status(led_status);
+}
+
+static void on_ble_state_change(ble_hid_state_t state)
 {
     switch (state) {
-    case BT_HID_STATE_IDLE:
+    case BLE_HID_STATE_IDLE:
         led_status_set(LED_STATUS_IDLE);
         break;
-    case BT_HID_STATE_SCANNING:
+    case BLE_HID_STATE_SCANNING:
         led_status_set(LED_STATUS_SCANNING);
         break;
-    case BT_HID_STATE_CONNECTING:
+    case BLE_HID_STATE_CONNECTING:
         led_status_set(LED_STATUS_CONNECTING);
         break;
-    case BT_HID_STATE_CONNECTED:
+    case BLE_HID_STATE_CONNECTED:
         led_status_set(LED_STATUS_CONNECTED);
+        // Clean slate on the USB side, then sync LED state
+        memset(s_prev_keys, 0, sizeof(s_prev_keys));
         ch9329_release_all_keys();
+        schedule_led_poll(LED_POLL_AFTER_CONNECT_MS);
         break;
-    case BT_HID_STATE_PAIRING:
+    case BLE_HID_STATE_PAIRING:
         led_status_set(LED_STATUS_PAIRING);
         break;
-    case BT_HID_STATE_ERROR:
+    case BLE_HID_STATE_ERROR:
         led_status_set(LED_STATUS_ERROR);
         break;
     }
+
+    if (state != BLE_HID_STATE_CONNECTED) {
+        // Never leave keys held on the PC when the link is not up
+        ch9329_release_all_keys();
+    }
 }
 
 /**
- * @brief Button event callback (runs in Timer Service task context)
- *
- * This callback runs in FreeRTOS Timer Service task, which has limited stack.
- * We MUST NOT call heavy Bluetooth APIs here. Instead, notify the dedicated
- * button_event_task to handle the actual work.
+ * @brief Button events (runs in Timer Service task - only queue posts here)
  */
 static void on_button_event(button_event_t event)
 {
-    if (s_button_task_handle == NULL) {
-        ESP_LOGW(TAG, "Button task not initialized");
-        return;
+    if (event == BUTTON_EVENT_LONG_PRESS) {
+        ESP_LOGI(TAG, "Long press: entering pairing mode");
+        ch9329_release_all_keys();
+        ble_hid_host_start_pairing();
     }
-
-    // Map button event to task event
-    button_task_event_t task_event;
-    switch (event) {
-    case BUTTON_EVENT_SHORT_PRESS:
-        task_event = BUTTON_TASK_EVENT_SHORT_PRESS;
-        break;
-    case BUTTON_EVENT_LONG_PRESS:
-        task_event = BUTTON_TASK_EVENT_LONG_PRESS;
-        break;
-    default:
-        return;
-    }
-
-    // Send notification to button task (non-blocking, safe from timer context)
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xTaskNotifyFromISR(s_button_task_handle, task_event, eSetValueWithOverwrite,
-                       &xHigherPriorityTaskWoken);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 /* ============================================================================
@@ -270,126 +165,68 @@ static esp_err_t init_all(void)
     esp_err_t ret;
 
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "BT HID Proxy - Initializing");
-    ESP_LOGI(TAG, "Target: M5Stamp Pico (ESP32-PICO-D4)");
+    ESP_LOGI(TAG, "BT HID Proxy (BLE/NimBLE) - Initializing");
     ESP_LOGI(TAG, "========================================");
 
-    // 1. Initialize NVS storage
-    ESP_LOGI(TAG, "Initializing storage...");
     ret = storage_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Storage init failed: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    // 2. Load paired device
-    ret = storage_load_paired_device(&s_paired_device);
-    if (ret == ESP_OK && s_paired_device.valid) {
-        s_has_paired = true;
-        char addr_str[18];
-        storage_bd_addr_to_str(s_paired_device.bd_addr, addr_str);
-        ESP_LOGI(TAG, "Loaded paired device: %s (BLE=%d)", addr_str, s_paired_device.is_ble);
-    } else {
-        s_has_paired = false;
-        ESP_LOGI(TAG, "No paired device stored");
-    }
-
-    // 3. Initialize CH9329 UART
-    ESP_LOGI(TAG, "Initializing CH9329...");
     ret = ch9329_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "CH9329 init failed: %s", esp_err_to_name(ret));
         return ret;
     }
+    ch9329_set_led_callback(on_pc_led_status);
 
-    // Set LED callback and start RX task
-    ch9329_set_led_callback(on_led_status);
-    ret = ch9329_start_rx_task();
+    const esp_timer_create_args_t timer_args = {
+        .callback = led_poll_timer_cb,
+        .name = "led_poll",
+    };
+    ret = esp_timer_create(&timer_args, &s_led_poll_timer);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "CH9329 RX task start failed (non-critical): %s", esp_err_to_name(ret));
-        // Continue without LED feedback - not critical
+        ESP_LOGW(TAG, "LED poll timer create failed (non-critical): %s",
+                 esp_err_to_name(ret));
     }
 
-    // 4. Initialize Bluetooth HID Host
-    ESP_LOGI(TAG, "Initializing Bluetooth HID Host...");
-    ret = bt_hid_host_init(on_keyboard_input, on_bt_state_change);
+    ret = led_status_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "BT HID Host init failed: %s", esp_err_to_name(ret));
-        return ret;
+        ESP_LOGW(TAG, "LED init failed (non-critical): %s", esp_err_to_name(ret));
     }
 
-    // 5. Create button event handler task
-    ESP_LOGI(TAG, "Creating button event handler task...");
-    BaseType_t task_ret = xTaskCreate(
-        button_event_task,
-        "button_evt",
-        4096,  // Stack size (bytes) - needs to be large enough for BT API calls
-        NULL,
-        5,     // Priority (same as main task)
-        &s_button_task_handle
-    );
-    if (task_ret != pdPASS || s_button_task_handle == NULL) {
-        ESP_LOGE(TAG, "Failed to create button event task");
-        return ESP_FAIL;
-    }
-
-    // 6. Initialize button handler
-    ESP_LOGI(TAG, "Initializing button handler...");
     ret = button_init(on_button_event);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Button init failed: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    // 7. Initialize LED status indicator
-    ESP_LOGI(TAG, "Initializing LED status...");
-    ret = led_status_init();
+    // BLE last: reconnection starts immediately if a bonded keyboard exists
+    ret = ble_hid_host_init(on_keyboard_report, on_ble_state_change);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "LED init failed (non-critical): %s", esp_err_to_name(ret));
-        // Continue without LED - not critical
+        ESP_LOGE(TAG, "BLE HID host init failed: %s", esp_err_to_name(ret));
+        return ret;
     }
 
-    ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "Initialization complete");
-    ESP_LOGI(TAG, "========================================");
-
     return ESP_OK;
 }
 
-/* ============================================================================
- * Main Entry Point
- * ============================================================================ */
-
 void app_main(void)
 {
-    // Initialize all modules
-    esp_err_t ret = init_all();
-    if (ret != ESP_OK) {
+    if (init_all() != ESP_OK) {
         ESP_LOGE(TAG, "Initialization failed, restarting in 5 seconds...");
         vTaskDelay(pdMS_TO_TICKS(5000));
         esp_restart();
         return;
     }
 
-    // Start operation
-    if (s_has_paired) {
-        // Set target device and attempt direct connection (faster than scanning)
-        ESP_LOGI(TAG, "Attempting direct connection to paired device...");
-        bt_hid_host_set_target(s_paired_device.bd_addr, s_paired_device.is_ble, s_paired_device.addr_type);
-        bt_hid_host_connect_direct(s_paired_device.bd_addr, s_paired_device.is_ble, s_paired_device.addr_type);
-    } else {
-        // No paired device - enter pairing mode
-        ESP_LOGI(TAG, "No paired device, entering pairing mode...");
-        bt_hid_host_start_pairing();
-    }
-
-    // Main loop - monitoring and maintenance
+    // Main task: periodic health log only
     while (1) {
-        // Periodic status check (every 30 seconds)
-        vTaskDelay(pdMS_TO_TICKS(30000));
-
-        bt_hid_state_t state = bt_hid_host_get_state();
-        // Periodic status check (silent unless debugging)
-        ESP_LOGD(TAG, "Status: %d, Heap: %lu", state, esp_get_free_heap_size());
+        vTaskDelay(pdMS_TO_TICKS(60000));
+        ESP_LOGD(TAG, "State: %d, free heap: %lu",
+                 ble_hid_host_get_state(),
+                 (unsigned long)esp_get_free_heap_size());
     }
 }
