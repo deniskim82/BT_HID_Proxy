@@ -124,10 +124,28 @@ static uint8_t s_report_map[REPORT_MAP_MAX_LEN];
 static size_t s_report_map_len = 0;
 static hid_report_map_info_t s_map_info;
 
-// Selected handles for relaying
-static volatile uint16_t s_kb_input_val_handle = 0;
+/**
+ * @brief One subscribed keyboard input report.
+ *
+ * A keyboard typically declares more than one (e.g. 6KRO + NKRO) and sends on
+ * whichever matches its current mode, so all of them are subscribed and each
+ * notification is decoded with the layout belonging to its own handle.
+ */
+typedef struct {
+    uint16_t val_handle;
+    uint16_t ccc_handle;
+    const hid_kb_layout_t *layout;  // NULL => boot protocol report
+} kb_sub_t;
+
+static kb_sub_t s_subs[HID_MAX_KB_REPORTS + 1];
+static volatile int s_num_subs = 0;
+static int s_sub_idx = 0;
+
 static volatile uint16_t s_led_output_val_handle = 0;
-static volatile bool s_boot_mode = false;
+
+// Diagnostics: log the first few reports after each connection
+#define INPUT_LOG_BUDGET    10
+static int s_input_log_budget = 0;
 
 // Tasks / sync
 static TaskHandle_t s_ctrl_task_handle = NULL;
@@ -167,9 +185,10 @@ static void reset_disc_ctx(void)
     s_disc_idx = 0;
     s_report_map_len = 0;
     memset(&s_map_info, 0, sizeof(s_map_info));
-    s_kb_input_val_handle = 0;
+    s_num_subs = 0;
+    s_sub_idx = 0;
+    memset(s_subs, 0, sizeof(s_subs));
     s_led_output_val_handle = 0;
-    s_boot_mode = false;
     memset(s_chrs, 0, sizeof(s_chrs));
 }
 
@@ -386,7 +405,9 @@ static int report_map_read_cb(uint16_t conn_handle, const struct ble_gatt_error 
     }
 
     if (error->status == BLE_HS_EDONE) {
-        ESP_LOGI(TAG, "Report map: %d bytes", (int)s_report_map_len);
+        // Dump the raw descriptor: with it, any keyboard that still misbehaves
+        // can be diagnosed offline from a single serial capture.
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, s_report_map, s_report_map_len, ESP_LOG_INFO);
         hid_parser_parse_report_map(s_report_map, s_report_map_len, &s_map_info);
         s_disc_idx = 0;
         next_dsc_discovery();
@@ -499,20 +520,65 @@ static void next_ref_read(void)
     configure_reports();
 }
 
+static void subscribe_next(void);
+
 static int subscribe_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
                         struct ble_gatt_attr *attr, void *arg)
 {
     if (error->status != 0) {
-        ESP_LOGW(TAG, "CCCD write failed: %d", error->status);
-        fail_connection();
-        return 0;
+        // One report failing to subscribe is not fatal as long as another
+        // one works - drop it from the list and carry on.
+        ESP_LOGW(TAG, "CCCD write failed on handle %d: %d",
+                 s_subs[s_sub_idx].val_handle, error->status);
+        s_subs[s_sub_idx].val_handle = 0;
+    } else {
+        ESP_LOGI(TAG, "Subscribed: handle=%d report_id=%d (%s)",
+                 s_subs[s_sub_idx].val_handle,
+                 s_subs[s_sub_idx].layout ? s_subs[s_sub_idx].layout->report_id : 0,
+                 s_subs[s_sub_idx].layout == NULL ? "boot" :
+                 (s_subs[s_sub_idx].layout->keys_kind == HID_KEYS_ARRAY ? "array" : "bitmap"));
     }
 
-    ESP_LOGI(TAG, "Subscribed to keyboard input (%s protocol)",
-             s_boot_mode ? "boot" : "report");
+    s_sub_idx++;
+    subscribe_next();
+    return 0;
+}
+
+static void subscribe_next(void)
+{
+    while (s_sub_idx < s_num_subs) {
+        kb_sub_t *sub = &s_subs[s_sub_idx];
+
+        uint8_t ccc_val[2] = {0x01, 0x00};
+        int rc = ble_gattc_write_flat(s_conn_handle, sub->ccc_handle,
+                                      ccc_val, sizeof(ccc_val), subscribe_cb, NULL);
+        if (rc == 0) {
+            return;  // Wait for the callback
+        }
+
+        ESP_LOGW(TAG, "CCCD write start failed on handle %d: %d", sub->val_handle, rc);
+        sub->val_handle = 0;
+        s_sub_idx++;
+    }
+
+    // Done: at least one live subscription is required
+    int live = 0;
+    for (int i = 0; i < s_num_subs; i++) {
+        if (s_subs[i].val_handle != 0) {
+            live++;
+        }
+    }
+
+    if (live == 0) {
+        ESP_LOGW(TAG, "No keyboard report could be subscribed");
+        fail_connection();
+        return;
+    }
+
+    ESP_LOGI(TAG, "Relaying %d keyboard report(s)", live);
+    s_input_log_budget = INPUT_LOG_BUDGET;
     set_state(BLE_HID_STATE_CONNECTED);
     xEventGroupSetBits(s_events, EVT_READY);
-    return 0;
 }
 
 static hid_chr_t *find_chr_uuid(uint16_t uuid16)
@@ -527,88 +593,112 @@ static hid_chr_t *find_chr_uuid(uint16_t uuid16)
 
 static void configure_reports(void)
 {
-    hid_chr_t *kb_chr = NULL;
     hid_chr_t *led_chr = NULL;
 
-    if (s_map_info.kb.valid) {
-        // Match by report ID from the parsed report map
-        for (int i = 0; i < s_num_chrs; i++) {
-            hid_chr_t *c = &s_chrs[i];
-            if (c->uuid16 != UUID_CHR_REPORT) {
-                continue;
-            }
-            if (c->report_type == REPORT_TYPE_INPUT &&
-                c->report_id == s_map_info.kb.report_id && c->ccc_handle != 0) {
-                kb_chr = c;
-            }
-            if (s_map_info.has_led_output &&
-                c->report_type == REPORT_TYPE_OUTPUT &&
-                c->report_id == s_map_info.led_report_id) {
-                led_chr = c;
-            }
-        }
-
-        // Devices without report IDs may omit the Report Reference descriptor:
-        // fall back to the only subscribable input report
-        if (kb_chr == NULL && s_map_info.kb.report_id == 0) {
-            hid_chr_t *only = NULL;
-            int count = 0;
-            for (int i = 0; i < s_num_chrs; i++) {
-                hid_chr_t *c = &s_chrs[i];
-                if (c->uuid16 == UUID_CHR_REPORT && c->ccc_handle != 0) {
-                    only = c;
-                    count++;
-                }
-            }
-            if (count == 1) {
-                kb_chr = only;
-            }
+    // Log what we found, so a keyboard that misbehaves can be diagnosed
+    // from a single serial capture.
+    for (int i = 0; i < s_num_chrs; i++) {
+        hid_chr_t *c = &s_chrs[i];
+        if (c->uuid16 == UUID_CHR_REPORT) {
+            ESP_LOGI(TAG, "Report chr: handle=%d id=%d type=%d ccc=%d props=0x%02X",
+                     c->val_handle, c->report_id, c->report_type,
+                     c->ccc_handle, c->properties);
         }
     }
 
-    if (kb_chr != NULL) {
-        // Report protocol: make sure protocol mode is Report (0x01)
-        hid_chr_t *proto = find_chr_uuid(UUID_CHR_PROTOCOL_MODE);
+    // Subscribe to EVERY input report the report map identified as keyboard.
+    // Keyboards commonly declare both a 6KRO and an NKRO report and send on
+    // whichever matches their current mode; subscribing to only one leaves
+    // the link up but silent.
+    for (int i = 0; i < s_num_chrs && s_num_subs < HID_MAX_KB_REPORTS; i++) {
+        hid_chr_t *c = &s_chrs[i];
+        if (c->uuid16 != UUID_CHR_REPORT) {
+            continue;
+        }
+
+        if (s_map_info.has_led_output && led_chr == NULL &&
+            c->report_type == REPORT_TYPE_OUTPUT &&
+            c->report_id == s_map_info.led_report_id) {
+            led_chr = c;
+        }
+
+        if (c->report_type != REPORT_TYPE_INPUT || c->ccc_handle == 0) {
+            continue;
+        }
+
+        const hid_kb_layout_t *layout = hid_parser_find_layout(&s_map_info, c->report_id);
+        if (layout == NULL) {
+            continue;   // Not a keyboard report - never forwarded
+        }
+
+        s_subs[s_num_subs].val_handle = c->val_handle;
+        s_subs[s_num_subs].ccc_handle = c->ccc_handle;
+        s_subs[s_num_subs].layout = layout;
+        s_num_subs++;
+    }
+
+    // Devices that use a single report without report IDs may omit the Report
+    // Reference descriptor entirely.
+    if (s_num_subs == 0 && s_map_info.num_kbs == 1 && s_map_info.kbs[0].report_id == 0) {
+        hid_chr_t *only = NULL;
+        int count = 0;
+        for (int i = 0; i < s_num_chrs; i++) {
+            hid_chr_t *c = &s_chrs[i];
+            if (c->uuid16 == UUID_CHR_REPORT && c->ccc_handle != 0 &&
+                c->report_type != REPORT_TYPE_OUTPUT) {
+                only = c;
+                count++;
+            }
+        }
+        if (count == 1) {
+            s_subs[0].val_handle = only->val_handle;
+            s_subs[0].ccc_handle = only->ccc_handle;
+            s_subs[0].layout = &s_map_info.kbs[0];
+            s_num_subs = 1;
+        }
+    }
+
+    hid_chr_t *proto = find_chr_uuid(UUID_CHR_PROTOCOL_MODE);
+
+    if (s_num_subs > 0) {
+        // Report protocol (0x01) is the default, but be explicit: a keyboard
+        // left in boot mode by a previous host would otherwise stay silent
+        // on the report characteristics we just subscribed to.
         if (proto != NULL) {
             uint8_t mode = 0x01;
             ble_gattc_write_no_rsp_flat(s_conn_handle, proto->val_handle, &mode, 1);
         }
 
-        s_boot_mode = false;
-        s_kb_input_val_handle = kb_chr->val_handle;
-        s_led_output_val_handle = (led_chr != NULL) ? led_chr->val_handle : 0;
+        hid_chr_t *boot_out = find_chr_uuid(UUID_CHR_BOOT_KB_OUT);
+        s_led_output_val_handle = (led_chr != NULL) ? led_chr->val_handle
+                                : (boot_out != NULL) ? boot_out->val_handle : 0;
     } else {
         // Boot protocol fallback
         hid_chr_t *boot_in = find_chr_uuid(UUID_CHR_BOOT_KB_IN);
         hid_chr_t *boot_out = find_chr_uuid(UUID_CHR_BOOT_KB_OUT);
-        hid_chr_t *proto = find_chr_uuid(UUID_CHR_PROTOCOL_MODE);
 
         if (boot_in == NULL || boot_in->ccc_handle == 0) {
-            ESP_LOGW(TAG, "No usable keyboard input report (map valid=%d, chrs=%d)",
-                     s_map_info.kb.valid, s_num_chrs);
+            ESP_LOGW(TAG, "No usable keyboard input report (kb reports=%d, chrs=%d)",
+                     s_map_info.num_kbs, s_num_chrs);
             fail_connection();
             return;
         }
 
+        ESP_LOGI(TAG, "Falling back to boot protocol");
         if (proto != NULL) {
-            uint8_t mode = 0x00;  // Boot protocol
+            uint8_t mode = 0x00;
             ble_gattc_write_no_rsp_flat(s_conn_handle, proto->val_handle, &mode, 1);
         }
 
-        s_boot_mode = true;
-        kb_chr = boot_in;
-        s_kb_input_val_handle = boot_in->val_handle;
+        s_subs[0].val_handle = boot_in->val_handle;
+        s_subs[0].ccc_handle = boot_in->ccc_handle;
+        s_subs[0].layout = NULL;    // Already in boot format
+        s_num_subs = 1;
         s_led_output_val_handle = (boot_out != NULL) ? boot_out->val_handle : 0;
     }
 
-    // Enable notifications on the keyboard input report only
-    uint8_t ccc_val[2] = {0x01, 0x00};
-    int rc = ble_gattc_write_flat(s_conn_handle, kb_chr->ccc_handle,
-                                  ccc_val, sizeof(ccc_val), subscribe_cb, NULL);
-    if (rc != 0) {
-        ESP_LOGW(TAG, "CCCD write start failed: %d", rc);
-        fail_connection();
-    }
+    s_sub_idx = 0;
+    subscribe_next();
 }
 
 static void start_discovery(void)
@@ -628,7 +718,7 @@ static void start_discovery(void)
  * Input handling
  * ============================================================================ */
 
-static void handle_input_notification(struct os_mbuf *om)
+static void handle_input_notification(const kb_sub_t *sub, struct os_mbuf *om)
 {
     uint8_t raw[32];
     uint16_t len = OS_MBUF_PKTLEN(om);
@@ -639,14 +729,25 @@ static void handle_input_notification(struct os_mbuf *om)
 
     uint8_t boot[8];
 
-    if (s_boot_mode) {
+    if (sub->layout == NULL) {
         // Boot keyboard input report is already in boot format
         memset(boot, 0, sizeof(boot));
         memcpy(boot, raw, len > 8 ? 8 : len);
-    } else {
-        if (!hid_parser_to_boot_report(&s_map_info.kb, raw, len, boot)) {
-            return;
-        }
+    } else if (!hid_parser_to_boot_report(sub->layout, raw, len, boot)) {
+        return;
+    }
+
+    if (s_input_log_budget > 0) {
+        s_input_log_budget--;
+        ESP_LOGI(TAG, "IN handle=%d len=%d raw=%02X %02X %02X %02X %02X %02X %02X %02X"
+                      " -> boot=%02X %02X %02X %02X %02X %02X %02X %02X",
+                 sub->val_handle, len,
+                 len > 0 ? raw[0] : 0, len > 1 ? raw[1] : 0,
+                 len > 2 ? raw[2] : 0, len > 3 ? raw[3] : 0,
+                 len > 4 ? raw[4] : 0, len > 5 ? raw[5] : 0,
+                 len > 6 ? raw[6] : 0, len > 7 ? raw[7] : 0,
+                 boot[0], boot[1], boot[2], boot[3],
+                 boot[4], boot[5], boot[6], boot[7]);
     }
 
     if (s_keyboard_cb) {
@@ -792,12 +893,19 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         return BLE_GAP_REPEAT_PAIRING_RETRY;
     }
 
-    case BLE_GAP_EVENT_NOTIFY_RX:
-        if (s_kb_input_val_handle != 0 &&
-            event->notify_rx.attr_handle == s_kb_input_val_handle) {
-            handle_input_notification(event->notify_rx.om);
+    case BLE_GAP_EVENT_NOTIFY_RX: {
+        uint16_t h = event->notify_rx.attr_handle;
+        for (int i = 0; i < s_num_subs; i++) {
+            if (s_subs[i].val_handle == h) {
+                handle_input_notification(&s_subs[i], event->notify_rx.om);
+                return 0;
+            }
         }
+        // Not a keyboard report: deliberately ignored (this is what prevents
+        // media/vendor reports from being injected as keystrokes)
+        ESP_LOGD(TAG, "Ignored notification on handle %d", h);
         return 0;
+    }
 
     case BLE_GAP_EVENT_CONN_UPDATE_REQ:
         // Accept whatever the keyboard asks for (it knows its power budget)

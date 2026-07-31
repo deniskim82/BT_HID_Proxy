@@ -3,13 +3,19 @@
  * @brief Minimal HID report descriptor parser for keyboard devices
  *
  * Parses a HID report map just far enough to answer three questions:
- *  1. Which input report ID carries keyboard keys, and what is its layout?
- *  2. Is that layout a standard key array (boot-like) or an NKRO bitmap?
+ *  1. Which input report IDs carry keyboard keys, and what is each layout?
+ *  2. Is a layout a standard key array (boot-like) or an NKRO bitmap?
  *  3. Which output report ID carries the LED (Caps/Num/Scroll) state?
  *
- * This is the structural fix for the "random key repeats forever" bug of the
- * previous implementation: only reports positively identified as keyboard
- * input are ever translated and forwarded to the USB side.
+ * A keyboard commonly declares SEVERAL keyboard input reports (e.g. a 6KRO
+ * boot-style report plus an NKRO bitmap report) and sends on whichever one
+ * matches its current mode. All of them are reported here, and the host
+ * subscribes to all of them - picking only one is how the previous version
+ * ended up connected but silent on NKRO keyboards.
+ *
+ * Reports that are not positively identified as keyboard input are never
+ * returned, which is what keeps media/vendor/handshake reports from being
+ * mistaken for keystrokes.
  */
 
 #ifndef HID_PARSER_H
@@ -22,6 +28,9 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/** Maximum number of distinct keyboard input reports tracked per device */
+#define HID_MAX_KB_REPORTS  4
 
 typedef enum {
     HID_KEYS_NONE = 0,
@@ -44,11 +53,12 @@ typedef struct {
     uint16_t keys_count;        // Array: number of keycode slots. Bitmap: number of bits.
     uint8_t keys_usage_min;     // Bitmap only: usage of bit 0
 
-    uint16_t report_bits;       // Total payload size in bits (for length sanity check)
+    uint16_t report_bits;       // Total payload size in bits
 } hid_kb_layout_t;
 
 typedef struct {
-    hid_kb_layout_t kb;         // Keyboard input report layout
+    hid_kb_layout_t kbs[HID_MAX_KB_REPORTS];    // Keyboard input report layouts
+    int num_kbs;
 
     bool has_led_output;
     uint8_t led_report_id;      // Output report carrying LED usages (page 0x08)
@@ -60,10 +70,17 @@ typedef struct {
  * @param desc      Report descriptor bytes
  * @param desc_len  Descriptor length
  * @param out       Parsed result (zeroed on entry)
- * @return true if a keyboard input report was identified
+ * @return true if at least one keyboard input report was identified
  */
 bool hid_parser_parse_report_map(const uint8_t *desc, size_t desc_len,
                                  hid_report_map_info_t *out);
+
+/**
+ * @brief Look up a parsed layout by report ID.
+ * @return NULL if that report ID is not a keyboard input report
+ */
+const hid_kb_layout_t *hid_parser_find_layout(const hid_report_map_info_t *info,
+                                              uint8_t report_id);
 
 /**
  * @brief Translate a raw keyboard input report to an 8-byte boot report.
