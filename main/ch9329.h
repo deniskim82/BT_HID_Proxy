@@ -27,11 +27,16 @@ extern "C" {
 #define CH9329_CMD_GET_INFO     0x01
 #define CH9329_CMD_KEYBOARD     0x02
 #define CH9329_CMD_GET_PARA_CFG 0x08
-#define CH9329_CMD_GET_LED      0x0D
+/* NOTE: 0x0D is CMD_RESET on this chip, NOT a "get LED" command. The CH9329
+ * has no dedicated LED query - the host's Caps/Num/Scroll state is carried in
+ * the GET_INFO (0x01) reply. Sending 0x0D resets the chip and drops its USB
+ * enumeration, which is exactly what an earlier version of this driver did on
+ * every connect and every lock-key press. */
+#define CH9329_CMD_RESET        0x0D
 #define CH9329_CMD_INFO_RESPONSE 0x81
 #define CH9329_CMD_PARA_CFG_RESPONSE 0x88
 #define CH9329_CMD_KB_ACK       0x82
-#define CH9329_CMD_LED_RESPONSE 0x8D
+#define CH9329_CMD_RESET_RESPONSE 0x8D
 #define CH9329_KB_REPORT_SIZE   0x08
 
 /**
@@ -67,7 +72,10 @@ esp_err_t ch9329_send_keyboard_report(const uint8_t data[8]);
 esp_err_t ch9329_release_all_keys(void);
 
 /**
- * @brief Queue a GET_LED_STATUS request; answer arrives via the LED callback.
+ * @brief Queue a request for the host's LED state.
+ *
+ * Implemented as GET_INFO: the reply carries the Caps/Num/Scroll state, and
+ * the LED callback is invoked when it changes.
  */
 esp_err_t ch9329_request_led_status(void);
 
