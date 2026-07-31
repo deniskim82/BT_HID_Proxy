@@ -24,8 +24,10 @@ extern "C" {
 #define CH9329_HEADER_1         0x57
 #define CH9329_HEADER_2         0xAB
 #define CH9329_ADDR_DEFAULT     0x00
+#define CH9329_CMD_GET_INFO     0x01
 #define CH9329_CMD_KEYBOARD     0x02
 #define CH9329_CMD_GET_LED      0x0D
+#define CH9329_CMD_INFO_RESPONSE 0x81
 #define CH9329_CMD_KB_ACK       0x82
 #define CH9329_CMD_LED_RESPONSE 0x8D
 #define CH9329_KB_REPORT_SIZE   0x08
@@ -66,6 +68,20 @@ esp_err_t ch9329_release_all_keys(void);
  * @brief Queue a GET_LED_STATUS request; answer arrives via the LED callback.
  */
 esp_err_t ch9329_request_led_status(void);
+
+/**
+ * @brief Queue a GET_INFO request; the reply is logged.
+ *
+ * The reply carries the chip version and, importantly, whether the CH9329
+ * believes it is enumerated on the USB host. That separates "chip is dead or
+ * not listening on UART" from "chip is fine but its USB side never came up".
+ */
+esp_err_t ch9329_request_info(void);
+
+/**
+ * @brief Baud rate the driver settled on (after auto-detection).
+ */
+int ch9329_get_baud_rate(void);
 
 /**
  * @brief Register callback invoked when the host PC's LED state changes.

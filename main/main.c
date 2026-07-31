@@ -153,6 +153,11 @@ static void on_button_event(button_event_t event)
         ESP_LOGI(TAG, "Long press: entering pairing mode");
         ch9329_release_all_keys();
         ble_hid_host_start_pairing();
+    } else if (event == BUTTON_EVENT_SHORT_PRESS) {
+        // Re-query the CH9329 so its USB enumeration state can be checked
+        // on demand, e.g. after re-plugging the USB cable.
+        ESP_LOGI(TAG, "Short press: querying CH9329 status");
+        ch9329_request_info();
     }
 }
 
