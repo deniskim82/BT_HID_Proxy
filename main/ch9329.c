@@ -26,6 +26,7 @@ typedef enum {
     TX_MSG_KB_REPORT = 0,   // 8-byte keyboard report
     TX_MSG_RELEASE_ALL,     // Force-send empty report, reset dedup state
     TX_MSG_LED_REQUEST,     // GET_LED_STATUS command
+    TX_MSG_INFO_REQUEST,    // GET_INFO command
 } tx_msg_type_t;
 
 typedef struct {
@@ -40,6 +41,9 @@ static TaskHandle_t s_rx_task_handle = NULL;
 static volatile bool s_tasks_running = false;
 
 static ch9329_led_cb_t s_led_callback = NULL;
+
+// Baud rate actually in use (see probe_baud_rates())
+static int s_baud_rate = CH9329_UART_BAUD_RATE;
 
 /* ============================================================================
  * TX Task
@@ -118,6 +122,10 @@ static void tx_task(void *pvParameters)
         case TX_MSG_LED_REQUEST:
             send_frame(CH9329_CMD_GET_LED, NULL, 0);
             break;
+
+        case TX_MSG_INFO_REQUEST:
+            send_frame(CH9329_CMD_GET_INFO, NULL, 0);
+            break;
         }
     }
 
@@ -163,6 +171,19 @@ static void parse_rx_frame(const uint8_t *data, size_t len)
 
     // Keyboard ACK arrives for every keystroke - ignore silently
     if (cmd == CH9329_CMD_KB_ACK) {
+        return;
+    }
+
+    if (cmd == CH9329_CMD_INFO_RESPONSE && data_len >= 2) {
+        // Reply layout: [chip version][USB enumeration status][LED status]...
+        uint8_t version = data[5];
+        uint8_t usb_status = data[6];
+
+        ESP_LOGI(TAG, "CH9329 INFO: version=0x%02X usb_status=0x%02X -> USB %s",
+                 version, usb_status,
+                 usb_status ? "ENUMERATED (host sees the device)"
+                            : "NOT ENUMERATED (chip alive, USB side is the fault)");
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, &data[5], data_len, ESP_LOG_INFO);
         return;
     }
 
@@ -278,6 +299,89 @@ static esp_err_t enqueue_msg(const tx_msg_t *msg)
 }
 
 /* ============================================================================
+ * Baud Rate Probing
+ * ============================================================================ */
+
+/**
+ * @brief Send GET_INFO at a given baud rate and wait for the 0x81 reply.
+ *
+ * Runs before the TX/RX tasks are started, so it can drive the port directly.
+ * @return true if a well-formed reply arrived
+ */
+static bool probe_at_baud(int baud)
+{
+    uart_set_baudrate(CH9329_UART_NUM, baud);
+    uart_flush_input(CH9329_UART_NUM);
+
+    // GET_INFO: 57 AB 00 01 00 <checksum>
+    uint8_t req[6] = {CH9329_HEADER_1, CH9329_HEADER_2, CH9329_ADDR_DEFAULT,
+                      CH9329_CMD_GET_INFO, 0x00, 0};
+    req[5] = req[0] + req[1] + req[2] + req[3] + req[4];
+
+    uart_write_bytes(CH9329_UART_NUM, req, sizeof(req));
+    uart_wait_tx_done(CH9329_UART_NUM, pdMS_TO_TICKS(100));
+
+    uint8_t buf[64];
+    int total = 0;
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(300);
+
+    while (xTaskGetTickCount() < deadline && total < (int)sizeof(buf)) {
+        int n = uart_read_bytes(CH9329_UART_NUM, &buf[total], sizeof(buf) - total,
+                                pdMS_TO_TICKS(50));
+        if (n > 0) {
+            total += n;
+            // Look for a header followed by the INFO response command
+            for (int i = 0; i + 3 < total; i++) {
+                if (buf[i] == CH9329_HEADER_1 && buf[i + 1] == CH9329_HEADER_2 &&
+                    buf[i + 3] == CH9329_CMD_INFO_RESPONSE) {
+                    ESP_LOGI(TAG, "CH9329 replied at %d baud", baud);
+                    return true;
+                }
+            }
+        }
+    }
+
+    if (total > 0) {
+        ESP_LOGW(TAG, "No valid reply at %d baud, but %d byte(s) came back:",
+                 baud, total);
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, buf, total, ESP_LOG_WARN);
+    } else {
+        ESP_LOGW(TAG, "No reply at %d baud", baud);
+    }
+    return false;
+}
+
+/**
+ * @brief Settle on a working baud rate.
+ *
+ * Tries the configured rate first, then the CH9329 factory default of 9600,
+ * so a module that was never reconfigured still works. Falls back to the
+ * configured rate when the chip does not answer at all - which is itself a
+ * useful signal, logged loudly.
+ */
+static void probe_baud_rates(void)
+{
+    static const int candidates[] = {CH9329_UART_BAUD_RATE, 9600};
+
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        if (i > 0 && candidates[i] == candidates[0]) {
+            continue;
+        }
+        if (probe_at_baud(candidates[i])) {
+            s_baud_rate = candidates[i];
+            uart_set_baudrate(CH9329_UART_NUM, s_baud_rate);
+            return;
+        }
+    }
+
+    s_baud_rate = CH9329_UART_BAUD_RATE;
+    uart_set_baudrate(CH9329_UART_NUM, s_baud_rate);
+    ESP_LOGE(TAG, "CH9329 did not answer at any baud rate - chip not powered, "
+                  "RX line not connected, or chip faulty. Using %d baud.",
+             s_baud_rate);
+}
+
+/* ============================================================================
  * Public Functions
  * ============================================================================ */
 
@@ -316,6 +420,11 @@ esp_err_t ch9329_init(void)
         return ret;
     }
 
+    // Ask the chip who it is before the tasks take over the port. This both
+    // settles the baud rate and reports whether the CH9329 is enumerated on
+    // the USB host - the one thing the firmware otherwise cannot see.
+    probe_baud_rates();
+
     s_tx_queue = xQueueCreate(CH9329_TX_QUEUE_LEN, sizeof(tx_msg_t));
     if (s_tx_queue == NULL) {
         uart_driver_delete(CH9329_UART_NUM);
@@ -338,10 +447,11 @@ esp_err_t ch9329_init(void)
     s_initialized = true;
 
     ESP_LOGI(TAG, "Initialized (TX:%d RX:%d baud:%d)",
-             CH9329_UART_TX_PIN, CH9329_UART_RX_PIN, CH9329_UART_BAUD_RATE);
+             CH9329_UART_TX_PIN, CH9329_UART_RX_PIN, s_baud_rate);
 
-    // Start from a clean state
+    // Start from a clean state, then log the chip's USB status
     ch9329_release_all_keys();
+    ch9329_request_info();
 
     return ESP_OK;
 }
@@ -391,6 +501,17 @@ esp_err_t ch9329_request_led_status(void)
 {
     tx_msg_t msg = { .type = TX_MSG_LED_REQUEST };
     return enqueue_msg(&msg);
+}
+
+esp_err_t ch9329_request_info(void)
+{
+    tx_msg_t msg = { .type = TX_MSG_INFO_REQUEST };
+    return enqueue_msg(&msg);
+}
+
+int ch9329_get_baud_rate(void)
+{
+    return s_baud_rate;
 }
 
 void ch9329_set_led_callback(ch9329_led_cb_t cb)
