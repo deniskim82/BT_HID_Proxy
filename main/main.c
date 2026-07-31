@@ -158,6 +158,7 @@ static void on_button_event(button_event_t event)
         // on demand, e.g. after re-plugging the USB cable.
         ESP_LOGI(TAG, "Short press: querying CH9329 status");
         ch9329_request_info();
+        ch9329_request_para_cfg();
     }
 }
 
