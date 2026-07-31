@@ -339,6 +339,56 @@ static esp_err_t enqueue_msg(const tx_msg_t *msg)
  * ============================================================================ */
 
 /**
+ * @brief Build the 6-byte GET_INFO request frame.
+ */
+static void build_get_info(uint8_t req[6])
+{
+    req[0] = CH9329_HEADER_1;
+    req[1] = CH9329_HEADER_2;
+    req[2] = CH9329_ADDR_DEFAULT;
+    req[3] = CH9329_CMD_GET_INFO;
+    req[4] = 0x00;
+    req[5] = req[0] + req[1] + req[2] + req[3] + req[4];
+}
+
+/**
+ * @brief Prove the ESP32's own UART TX/RX path works, using the SoC's
+ *        internal loopback.
+ *
+ * This never touches the pins, so it isolates cleanly: if it passes but the
+ * CH9329 stays silent, everything inside the ESP32 - driver configuration,
+ * baud rate, transmit path, receive path, frame scanning - is proven healthy
+ * and the fault is necessarily external (wiring or the chip).
+ */
+static void uart_self_test(void)
+{
+    uint8_t req[6];
+    build_get_info(req);
+
+    uart_set_loop_back(CH9329_UART_NUM, true);
+    uart_flush_input(CH9329_UART_NUM);
+
+    uart_write_bytes(CH9329_UART_NUM, req, sizeof(req));
+    uart_wait_tx_done(CH9329_UART_NUM, pdMS_TO_TICKS(100));
+
+    uint8_t buf[16] = {0};
+    int n = uart_read_bytes(CH9329_UART_NUM, buf, sizeof(req), pdMS_TO_TICKS(200));
+
+    uart_set_loop_back(CH9329_UART_NUM, false);
+    uart_flush_input(CH9329_UART_NUM);
+
+    if (n == (int)sizeof(req) && memcmp(buf, req, sizeof(req)) == 0) {
+        ESP_LOGI(TAG, "UART self-test PASSED (internal loopback) - the ESP32 "
+                      "TX/RX path is healthy");
+    } else {
+        ESP_LOGE(TAG, "UART self-test FAILED (internal loopback): got %d byte(s)", n);
+        if (n > 0) {
+            ESP_LOG_BUFFER_HEX_LEVEL(TAG, buf, n, ESP_LOG_ERROR);
+        }
+    }
+}
+
+/**
  * @brief Send GET_INFO at a given baud rate and wait for the 0x81 reply.
  *
  * Runs before the TX/RX tasks are started, so it can drive the port directly.
@@ -349,10 +399,8 @@ static bool probe_at_baud(int baud)
     uart_set_baudrate(CH9329_UART_NUM, baud);
     uart_flush_input(CH9329_UART_NUM);
 
-    // GET_INFO: 57 AB 00 01 00 <checksum>
-    uint8_t req[6] = {CH9329_HEADER_1, CH9329_HEADER_2, CH9329_ADDR_DEFAULT,
-                      CH9329_CMD_GET_INFO, 0x00, 0};
-    req[5] = req[0] + req[1] + req[2] + req[3] + req[4];
+    uint8_t req[6];
+    build_get_info(req);
 
     uart_write_bytes(CH9329_UART_NUM, req, sizeof(req));
     uart_wait_tx_done(CH9329_UART_NUM, pdMS_TO_TICKS(100));
@@ -471,6 +519,7 @@ esp_err_t ch9329_init(void)
     // Ask the chip who it is before the tasks take over the port. This both
     // settles the baud rate and reports whether the CH9329 is enumerated on
     // the USB host - the one thing the firmware otherwise cannot see.
+    uart_self_test();
     probe_baud_rates();
 
     s_tx_queue = xQueueCreate(CH9329_TX_QUEUE_LEN, sizeof(tx_msg_t));
