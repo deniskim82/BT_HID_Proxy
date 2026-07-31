@@ -76,6 +76,9 @@ static void tx_task(void *pvParameters)
     bool last_report_valid = false;
     static const uint8_t empty_report[8] = {0};
 
+    // Diagnostics: confirm the first few frames actually reach the wire
+    int log_budget = 10;
+
     while (s_tasks_running) {
         if (xQueueReceive(s_tx_queue, &msg, pdMS_TO_TICKS(500)) != pdTRUE) {
             continue;
@@ -88,6 +91,12 @@ static void tx_task(void *pvParameters)
                 break;
             }
             send_frame(CH9329_CMD_KEYBOARD, msg.data, 8);
+            if (log_budget > 0) {
+                log_budget--;
+                ESP_LOGI(TAG, "TX KB: %02X %02X %02X %02X %02X %02X %02X %02X",
+                         msg.data[0], msg.data[1], msg.data[2], msg.data[3],
+                         msg.data[4], msg.data[5], msg.data[6], msg.data[7]);
+            }
             memcpy(last_report, msg.data, 8);
             last_report_valid = true;
             break;
