@@ -370,6 +370,18 @@ static void probe_baud_rates(void)
         if (probe_at_baud(candidates[i])) {
             s_baud_rate = candidates[i];
             uart_set_baudrate(CH9329_UART_NUM, s_baud_rate);
+
+            if (s_baud_rate < CH9329_UART_BAUD_RATE) {
+                // Workable but slow: a 14-byte key frame takes ~14.6 ms at
+                // 9600 versus ~1.2 ms at 115200. Landing here also means the
+                // chip is at its factory default, i.e. it lost the
+                // configuration it was given.
+                ESP_LOGW(TAG, "*** CH9329 is at %d baud, not the configured %d ***",
+                         s_baud_rate, CH9329_UART_BAUD_RATE);
+                ESP_LOGW(TAG, "*** Typing will work but each report costs ~%d ms. "
+                              "Reconfigure the chip to %d baud. ***",
+                         (14 * 10 * 1000) / s_baud_rate, CH9329_UART_BAUD_RATE);
+            }
             return;
         }
     }
