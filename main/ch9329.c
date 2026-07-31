@@ -25,7 +25,6 @@ static const char *TAG = "CH9329";
 typedef enum {
     TX_MSG_KB_REPORT = 0,   // 8-byte keyboard report
     TX_MSG_RELEASE_ALL,     // Force-send empty report, reset dedup state
-    TX_MSG_LED_REQUEST,     // GET_LED_STATUS command
     TX_MSG_INFO_REQUEST,    // GET_INFO command
     TX_MSG_PARA_REQUEST,    // GET_PARA_CFG command
 } tx_msg_type_t;
@@ -120,10 +119,6 @@ static void tx_task(void *pvParameters)
             last_report_valid = true;
             break;
 
-        case TX_MSG_LED_REQUEST:
-            send_frame(CH9329_CMD_GET_LED, NULL, 0);
-            break;
-
         case TX_MSG_INFO_REQUEST:
             send_frame(CH9329_CMD_GET_INFO, NULL, 0);
             break;
@@ -189,6 +184,20 @@ static void parse_rx_frame(const uint8_t *data, size_t len)
                  usb_status ? "ENUMERATED (host sees the device)"
                             : "NOT ENUMERATED (chip alive, USB side is the fault)");
         ESP_LOG_BUFFER_HEX_LEVEL(TAG, &data[5], data_len, ESP_LOG_INFO);
+
+        // The host's Caps/Num/Scroll state rides along in this same reply -
+        // there is no separate LED query command on this chip.
+        if (data_len >= 3) {
+            static uint8_t s_last_led = 0xFF;
+            uint8_t led_status = data[7];
+            if (led_status != s_last_led) {
+                s_last_led = led_status;
+                ESP_LOGD(TAG, "LED status: 0x%02X", led_status);
+                if (s_led_callback) {
+                    s_led_callback(led_status);
+                }
+            }
+        }
         return;
     }
 
@@ -223,17 +232,8 @@ static void parse_rx_frame(const uint8_t *data, size_t len)
         return;
     }
 
-    if (cmd == CH9329_CMD_LED_RESPONSE && data_len >= 1) {
-        static uint8_t s_last_led = 0xFF;
-        uint8_t led_status = data[5];
-
-        if (led_status != s_last_led) {
-            s_last_led = led_status;
-            ESP_LOGD(TAG, "LED status: 0x%02X", led_status);
-            if (s_led_callback) {
-                s_led_callback(led_status);
-            }
-        }
+    if (cmd == CH9329_CMD_RESET_RESPONSE) {
+        ESP_LOGW(TAG, "CH9329 acknowledged a RESET - its USB connection will drop");
         return;
     }
 
@@ -597,8 +597,8 @@ esp_err_t ch9329_release_all_keys(void)
 
 esp_err_t ch9329_request_led_status(void)
 {
-    tx_msg_t msg = { .type = TX_MSG_LED_REQUEST };
-    return enqueue_msg(&msg);
+    // GET_INFO carries the LED state; 0x0D would reset the chip.
+    return ch9329_request_info();
 }
 
 esp_err_t ch9329_request_info(void)
