@@ -27,6 +27,7 @@ typedef enum {
     TX_MSG_RELEASE_ALL,     // Force-send empty report, reset dedup state
     TX_MSG_LED_REQUEST,     // GET_LED_STATUS command
     TX_MSG_INFO_REQUEST,    // GET_INFO command
+    TX_MSG_PARA_REQUEST,    // GET_PARA_CFG command
 } tx_msg_type_t;
 
 typedef struct {
@@ -126,6 +127,10 @@ static void tx_task(void *pvParameters)
         case TX_MSG_INFO_REQUEST:
             send_frame(CH9329_CMD_GET_INFO, NULL, 0);
             break;
+
+        case TX_MSG_PARA_REQUEST:
+            send_frame(CH9329_CMD_GET_PARA_CFG, NULL, 0);
+            break;
         }
     }
 
@@ -184,6 +189,37 @@ static void parse_rx_frame(const uint8_t *data, size_t len)
                  usb_status ? "ENUMERATED (host sees the device)"
                             : "NOT ENUMERATED (chip alive, USB side is the fault)");
         ESP_LOG_BUFFER_HEX_LEVEL(TAG, &data[5], data_len, ESP_LOG_INFO);
+        return;
+    }
+
+    if (cmd == CH9329_CMD_PARA_CFG_RESPONSE && data_len >= 15) {
+        // Stored configuration. Offsets follow the CH9329 datasheet; the full
+        // block is dumped as hex too, so a misread field is harmless.
+        const uint8_t *c = &data[5];
+        uint8_t work_mode = c[0];
+        uint8_t serial_mode = c[1];
+        uint8_t chip_addr = c[2];
+        uint32_t baud = ((uint32_t)c[3] << 24) | ((uint32_t)c[4] << 16) |
+                        ((uint32_t)c[5] << 8) | c[6];
+        uint16_t vid = ((uint16_t)c[11] << 8) | c[12];
+        uint16_t pid = ((uint16_t)c[13] << 8) | c[14];
+
+        ESP_LOGI(TAG, "CH9329 CONFIG: usb_work_mode=0x%02X serial_mode=0x%02X "
+                      "chip_addr=0x%02X baud=%u VID=0x%04X PID=0x%04X",
+                 work_mode, serial_mode, chip_addr,
+                 (unsigned)baud, vid, pid);
+
+        if (work_mode > 0x03) {
+            ESP_LOGW(TAG, "*** usb_work_mode=0x%02X is not a standard HID mode "
+                          "(expected 0x00-0x03) - this alone can break USB "
+                          "enumeration ***", work_mode);
+        }
+        if (vid == 0x0000 || pid == 0x0000 || vid == 0xFFFF || pid == 0xFFFF) {
+            ESP_LOGW(TAG, "*** VID/PID look invalid - a host may refuse to "
+                          "enumerate the device ***");
+        }
+
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, c, data_len, ESP_LOG_INFO);
         return;
     }
 
@@ -464,6 +500,7 @@ esp_err_t ch9329_init(void)
     // Start from a clean state, then log the chip's USB status
     ch9329_release_all_keys();
     ch9329_request_info();
+    ch9329_request_para_cfg();
 
     return ESP_OK;
 }
@@ -518,6 +555,12 @@ esp_err_t ch9329_request_led_status(void)
 esp_err_t ch9329_request_info(void)
 {
     tx_msg_t msg = { .type = TX_MSG_INFO_REQUEST };
+    return enqueue_msg(&msg);
+}
+
+esp_err_t ch9329_request_para_cfg(void)
+{
+    tx_msg_t msg = { .type = TX_MSG_PARA_REQUEST };
     return enqueue_msg(&msg);
 }
 

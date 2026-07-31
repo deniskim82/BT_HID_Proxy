@@ -26,8 +26,10 @@ extern "C" {
 #define CH9329_ADDR_DEFAULT     0x00
 #define CH9329_CMD_GET_INFO     0x01
 #define CH9329_CMD_KEYBOARD     0x02
+#define CH9329_CMD_GET_PARA_CFG 0x08
 #define CH9329_CMD_GET_LED      0x0D
 #define CH9329_CMD_INFO_RESPONSE 0x81
+#define CH9329_CMD_PARA_CFG_RESPONSE 0x88
 #define CH9329_CMD_KB_ACK       0x82
 #define CH9329_CMD_LED_RESPONSE 0x8D
 #define CH9329_KB_REPORT_SIZE   0x08
@@ -77,6 +79,15 @@ esp_err_t ch9329_request_led_status(void);
  * not listening on UART" from "chip is fine but its USB side never came up".
  */
 esp_err_t ch9329_request_info(void);
+
+/**
+ * @brief Queue a GET_PARA_CFG request; the stored configuration is logged.
+ *
+ * Reads back what the chip actually has in its flash - USB working mode,
+ * serial mode, chip address, baud rate, VID/PID - so a configuration that
+ * breaks USB enumeration can be identified without the vendor tool.
+ */
+esp_err_t ch9329_request_para_cfg(void);
 
 /**
  * @brief Baud rate the driver settled on (after auto-detection).
