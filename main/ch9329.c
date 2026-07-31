@@ -93,9 +93,17 @@ static void tx_task(void *pvParameters)
             send_frame(CH9329_CMD_KEYBOARD, msg.data, 8);
             if (log_budget > 0) {
                 log_budget--;
-                ESP_LOGI(TAG, "TX KB: %02X %02X %02X %02X %02X %02X %02X %02X",
+                // uart_write_bytes only queues into the TX ring buffer, so it
+                // succeeding proves nothing about the wire. Draining the FIFO
+                // does: if this returns ESP_OK the bytes were physically
+                // clocked out of the TX pin, which moves the fault outside
+                // the ESP32 entirely. Only done for these first few frames -
+                // the hot path never waits.
+                esp_err_t drain = uart_wait_tx_done(CH9329_UART_NUM, pdMS_TO_TICKS(100));
+                ESP_LOGI(TAG, "TX KB: %02X %02X %02X %02X %02X %02X %02X %02X (drain=%s)",
                          msg.data[0], msg.data[1], msg.data[2], msg.data[3],
-                         msg.data[4], msg.data[5], msg.data[6], msg.data[7]);
+                         msg.data[4], msg.data[5], msg.data[6], msg.data[7],
+                         esp_err_to_name(drain));
             }
             memcpy(last_report, msg.data, 8);
             last_report_valid = true;
