@@ -93,9 +93,17 @@ static void tx_task(void *pvParameters)
             send_frame(CH9329_CMD_KEYBOARD, msg.data, 8);
             if (log_budget > 0) {
                 log_budget--;
-                ESP_LOGI(TAG, "TX KB: %02X %02X %02X %02X %02X %02X %02X %02X",
+                // uart_write_bytes only queues into the TX ring buffer, so it
+                // succeeding proves nothing about the wire. Draining the FIFO
+                // does: if this returns ESP_OK the bytes were physically
+                // clocked out of the TX pin, which moves the fault outside
+                // the ESP32 entirely. Only done for these first few frames -
+                // the hot path never waits.
+                esp_err_t drain = uart_wait_tx_done(CH9329_UART_NUM, pdMS_TO_TICKS(100));
+                ESP_LOGI(TAG, "TX KB: %02X %02X %02X %02X %02X %02X %02X %02X (drain=%s)",
                          msg.data[0], msg.data[1], msg.data[2], msg.data[3],
-                         msg.data[4], msg.data[5], msg.data[6], msg.data[7]);
+                         msg.data[4], msg.data[5], msg.data[6], msg.data[7],
+                         esp_err_to_name(drain));
             }
             memcpy(last_report, msg.data, 8);
             last_report_valid = true;
@@ -126,10 +134,22 @@ static void tx_task(void *pvParameters)
  *
  * Frame: [0x57][0xAB][ADDR][CMD][LEN][DATA...][CHECKSUM]
  */
+// Diagnostics: log the first few RX frames, including the keyboard ACKs that
+// are normally silent. Receiving an ACK proves the CH9329 is powered, at the
+// right baud rate, and actually receiving our frames - which is otherwise
+// impossible to tell apart from a dead TX line.
+static int s_rx_log_budget = 10;
+
 static void parse_rx_frame(const uint8_t *data, size_t len)
 {
     uint8_t cmd = data[3];
     uint8_t data_len = data[4];
+
+    if (s_rx_log_budget > 0) {
+        s_rx_log_budget--;
+        ESP_LOGI(TAG, "RX frame: CMD=0x%02X LEN=%d%s", cmd, data_len,
+                 cmd == CH9329_CMD_KB_ACK ? " (keyboard ACK)" : "");
+    }
 
     // Verify checksum
     uint8_t sum = 0;
@@ -175,6 +195,14 @@ static void rx_task(void *pvParameters)
         if (len <= 0) {
             continue;
         }
+
+        // Raw dump too: a baud rate mismatch produces garbage that never
+        // forms a valid frame, so it would otherwise be invisible.
+        if (s_rx_log_budget > 0) {
+            ESP_LOGI(TAG, "RX %d bytes:", len);
+            ESP_LOG_BUFFER_HEX_LEVEL(TAG, &rx_buffer[rx_pos], len, ESP_LOG_INFO);
+        }
+
         rx_pos += len;
 
         // Extract complete frames
