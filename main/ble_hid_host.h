@@ -34,16 +34,17 @@ typedef enum {
  * device - not a boot report, and not truncated to six keys. Merging the
  * devices and capping to the boot report's six slots happens in key_state.
  *
- * @param device  Source device index (always 0 while a single keyboard is
- *                supported; the parameter is here so the merge layer and its
- *                callers do not have to change when more are added)
- * @param modifiers Modifier byte from that device
- * @param keys      Keycodes currently held on that device
+ * @param source  Index identifying which subscribed report this came from.
+ *                A keyboard exposing both a 6KRO and an NKRO report produces
+ *                two sources, and they must be tracked separately: whichever
+ *                one the keyboard is not currently using reads as empty.
+ * @param modifiers Modifier byte from that report
+ * @param keys      Keycodes currently held in that report
  * @param count     Number of entries in @p keys
  *
  * Called from the NimBLE host task; must not block.
  */
-typedef void (*ble_hid_keyboard_cb_t)(int device, uint8_t modifiers,
+typedef void (*ble_hid_keyboard_cb_t)(int source, uint8_t modifiers,
                                       const uint8_t *keys, int count);
 
 typedef void (*ble_hid_state_cb_t)(ble_hid_state_t state);

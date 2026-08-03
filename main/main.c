@@ -98,22 +98,30 @@ static bool lock_key_just_pressed(const uint8_t *curr, int curr_count,
  * boot report. Sending the device's own report straight through would drop a
  * modifier held on a different keyboard once more than one is supported.
  */
-static void on_keyboard_report(int device, uint8_t modifiers,
+static void on_keyboard_report(int source, uint8_t modifiers,
                                const uint8_t *keys, int count)
 {
-    key_state_device_update(device, modifiers, keys, count);
+    key_state_source_update(source, modifiers, keys, count);
 
     uint8_t boot[8];
-    if (key_state_build_report(boot)) {
+    bool changed = key_state_build_report(boot);
+    if (changed) {
         ch9329_send_keyboard_report(boot);
     }
 
-    if (lock_key_just_pressed(keys, count, s_prev_keys, s_prev_key_count)) {
+    // Lock keys are detected on the merged report, not on this one source:
+    // with several reports feeding the merge, a single source's view is not
+    // the state the host actually sees.
+    if (changed &&
+        lock_key_just_pressed(&boot[2], KEY_STATE_SLOTS,
+                              s_prev_keys, s_prev_key_count)) {
         schedule_led_poll(LED_POLL_AFTER_KEY_MS);
     }
 
-    s_prev_key_count = count < KEY_STATE_MAX_KEYS ? count : KEY_STATE_MAX_KEYS;
-    memcpy(s_prev_keys, keys, s_prev_key_count);
+    if (changed) {
+        s_prev_key_count = KEY_STATE_SLOTS;
+        memcpy(s_prev_keys, &boot[2], KEY_STATE_SLOTS);
+    }
 }
 
 /**

@@ -749,7 +749,8 @@ static void start_discovery(void)
  * Input handling
  * ============================================================================ */
 
-static void handle_input_notification(const kb_sub_t *sub, struct os_mbuf *om)
+static void handle_input_notification(int sub_idx, const kb_sub_t *sub,
+                                      struct os_mbuf *om)
 {
     uint8_t raw[32];
     uint16_t len = OS_MBUF_PKTLEN(om);
@@ -797,16 +798,19 @@ static void handle_input_notification(const kb_sub_t *sub, struct os_mbuf *om)
 
     if (s_input_log_budget > 0) {
         s_input_log_budget--;
-        ESP_LOGI(TAG, "IN handle=%d len=%d mod=%02X keys=%d [%02X %02X %02X %02X %02X %02X]",
-                 sub->val_handle, len, modifiers, n,
+        ESP_LOGI(TAG, "IN src=%d handle=%d len=%d mod=%02X keys=%d [%02X %02X %02X %02X %02X %02X]",
+                 sub_idx, sub->val_handle, len, modifiers, n,
                  n > 0 ? keys[0] : 0, n > 1 ? keys[1] : 0,
                  n > 2 ? keys[2] : 0, n > 3 ? keys[3] : 0,
                  n > 4 ? keys[4] : 0, n > 5 ? keys[5] : 0);
     }
 
     if (s_keyboard_cb) {
-        // Single connection for now, so every source is device 0
-        s_keyboard_cb(0, modifiers, keys, n);
+        // Each subscribed report is its own state source. A keyboard that
+        // exposes both a 6KRO and an NKRO report sends on one while the other
+        // reads empty, so sharing a slot would let the idle report keep wiping
+        // the active one's keys.
+        s_keyboard_cb(sub_idx, modifiers, keys, n);
     }
 }
 
@@ -952,7 +956,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         uint16_t h = event->notify_rx.attr_handle;
         for (int i = 0; i < s_num_subs; i++) {
             if (s_subs[i].val_handle == h) {
-                handle_input_notification(&s_subs[i], event->notify_rx.om);
+                handle_input_notification(i, &s_subs[i], event->notify_rx.om);
                 return 0;
             }
         }
