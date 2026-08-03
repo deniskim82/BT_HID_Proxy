@@ -246,6 +246,8 @@ Standard 8-byte boot format:
 - [x] Media key support (consumer control report -> CH9329 multimedia command)
 - [ ] Mouse input support (for keyboards with a trackpoint or touchpad)
 - [ ] Multiple paired device storage
+- [ ] Move to an ESP32-S3 board with native USB OTG, dropping the CH9329 and
+      with it the six-key limit (see `CLAUDE.md`)
 - [ ] OTA firmware update
 
 ## License

@@ -76,4 +76,9 @@
 // Depth of the TX message queue (keyboard reports + control commands)
 #define CH9329_TX_QUEUE_LEN     32
 
+// Set to 0 to stop sending media/system key frames (CH9329 command 0x03)
+// entirely. Useful for bisecting: if a module misbehaves only once media keys
+// are in play, this isolates that command without touching anything else.
+#define CH9329_ENABLE_MEDIA_KEYS 1
+
 #endif /* CONFIG_H */
