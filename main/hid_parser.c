@@ -457,53 +457,51 @@ static inline uint8_t get_byte_at_bit(const uint8_t *data, size_t len, uint16_t 
     return (byte < len) ? data[byte] : 0;
 }
 
-bool hid_parser_to_boot_report(const hid_kb_layout_t *layout,
-                               const uint8_t *data, size_t len,
-                               uint8_t boot[8])
+int hid_parser_extract_keys(const hid_kb_layout_t *layout,
+                            const uint8_t *data, size_t len,
+                            uint8_t *mod_out, uint8_t *keys_out, int max_keys)
 {
-    if (layout == NULL || data == NULL || boot == NULL || !layout->valid) {
-        return false;
+    if (layout == NULL || data == NULL || keys_out == NULL || !layout->valid) {
+        return -1;
     }
 
-    memset(boot, 0, 8);
-
-    if (layout->mod_present) {
-        boot[0] = get_byte_at_bit(data, len, layout->mod_bit_offset);
+    if (mod_out != NULL) {
+        *mod_out = layout->mod_present
+                 ? get_byte_at_bit(data, len, layout->mod_bit_offset) : 0;
     }
+
+    int n = 0;
 
     if (layout->keys_kind == HID_KEYS_ARRAY) {
         if ((layout->keys_bit_offset % 8) != 0) {
-            return false;
+            return -1;
         }
         size_t start = layout->keys_bit_offset / 8;
-        int out_idx = 0;
-        for (uint16_t i = 0; i < layout->keys_count && out_idx < 6; i++) {
+        for (uint16_t i = 0; i < layout->keys_count && n < max_keys; i++) {
             if (start + i >= len) {
                 break;
             }
             uint8_t key = data[start + i];
             if (key != 0) {
-                boot[2 + out_idx++] = key;
+                keys_out[n++] = key;
             }
         }
-        return true;
+        return n;
     }
 
     if (layout->keys_kind == HID_KEYS_BITMAP) {
-        size_t start_bit = layout->keys_bit_offset;
-        int out_idx = 0;
-        for (uint16_t i = 0; i < layout->keys_count && out_idx < 6; i++) {
-            size_t bit = start_bit + i;
+        for (uint16_t i = 0; i < layout->keys_count && n < max_keys; i++) {
+            size_t bit = layout->keys_bit_offset + i;
             size_t byte = bit / 8;
             if (byte >= len) {
                 break;
             }
             if (data[byte] & (1u << (bit % 8))) {
-                boot[2 + out_idx++] = layout->keys_usage_min + (uint8_t)i;
+                keys_out[n++] = layout->keys_usage_min + (uint8_t)i;
             }
         }
-        return true;
+        return n;
     }
 
-    return false;
+    return -1;
 }

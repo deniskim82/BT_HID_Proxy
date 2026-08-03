@@ -18,6 +18,7 @@
 
 #include "ble_hid_host.h"
 #include "hid_parser.h"
+#include "key_state.h"
 #include "storage.h"
 #include "config.h"
 
@@ -773,31 +774,39 @@ static void handle_input_notification(const kb_sub_t *sub, struct os_mbuf *om)
         return;
     }
 
-    uint8_t boot[8];
+    uint8_t modifiers = 0;
+    uint8_t keys[KEY_STATE_MAX_KEYS];
+    int n;
 
     if (sub->layout == NULL) {
         // Boot keyboard input report is already in boot format
-        memset(boot, 0, sizeof(boot));
-        memcpy(boot, raw, len > 8 ? 8 : len);
-    } else if (!hid_parser_to_boot_report(sub->layout, raw, len, boot)) {
-        return;
+        modifiers = len > 0 ? raw[0] : 0;
+        n = 0;
+        for (uint16_t i = 2; i < len && i < 8 && n < (int)sizeof(keys); i++) {
+            if (raw[i] != 0) {
+                keys[n++] = raw[i];
+            }
+        }
+    } else {
+        n = hid_parser_extract_keys(sub->layout, raw, len, &modifiers,
+                                    keys, sizeof(keys));
+        if (n < 0) {
+            return;
+        }
     }
 
     if (s_input_log_budget > 0) {
         s_input_log_budget--;
-        ESP_LOGI(TAG, "IN handle=%d len=%d raw=%02X %02X %02X %02X %02X %02X %02X %02X"
-                      " -> boot=%02X %02X %02X %02X %02X %02X %02X %02X",
-                 sub->val_handle, len,
-                 len > 0 ? raw[0] : 0, len > 1 ? raw[1] : 0,
-                 len > 2 ? raw[2] : 0, len > 3 ? raw[3] : 0,
-                 len > 4 ? raw[4] : 0, len > 5 ? raw[5] : 0,
-                 len > 6 ? raw[6] : 0, len > 7 ? raw[7] : 0,
-                 boot[0], boot[1], boot[2], boot[3],
-                 boot[4], boot[5], boot[6], boot[7]);
+        ESP_LOGI(TAG, "IN handle=%d len=%d mod=%02X keys=%d [%02X %02X %02X %02X %02X %02X]",
+                 sub->val_handle, len, modifiers, n,
+                 n > 0 ? keys[0] : 0, n > 1 ? keys[1] : 0,
+                 n > 2 ? keys[2] : 0, n > 3 ? keys[3] : 0,
+                 n > 4 ? keys[4] : 0, n > 5 ? keys[5] : 0);
     }
 
     if (s_keyboard_cb) {
-        s_keyboard_cb(boot);
+        // Single connection for now, so every source is device 0
+        s_keyboard_cb(0, modifiers, keys, n);
     }
 }
 

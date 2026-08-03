@@ -135,17 +135,25 @@ int hid_parser_extract_usages(const hid_ext_layout_t *layout,
                               uint16_t *out, int max_out);
 
 /**
- * @brief Translate a raw keyboard input report to an 8-byte boot report.
+ * @brief Extract the modifiers and every pressed keycode from a keyboard report.
  *
- * @param layout  Layout from hid_parser_parse_report_map()
- * @param data    Raw report payload (without report ID prefix)
- * @param len     Payload length in bytes
- * @param boot    Output: 8-byte boot report [mod, 0, k1..k6]
- * @return true on success
+ * Deliberately does not truncate to the six slots of a boot report: an NKRO
+ * source can hold more than six keys, and cutting the list here - in keycode
+ * order, which is the order the bitmap is scanned in, not press order - lets a
+ * held key be bumped out when an unrelated key changes. Capping belongs at the
+ * point where the boot report is assembled (see key_state.h).
+ *
+ * @param layout    Layout from hid_parser_parse_report_map()
+ * @param data      Raw report payload (without report ID prefix)
+ * @param len       Payload length in bytes
+ * @param mod_out   Receives the modifier byte
+ * @param keys_out  Receives the pressed keycodes
+ * @param max_keys  Capacity of @p keys_out
+ * @return number of keycodes written, or -1 on failure
  */
-bool hid_parser_to_boot_report(const hid_kb_layout_t *layout,
-                               const uint8_t *data, size_t len,
-                               uint8_t boot[8]);
+int hid_parser_extract_keys(const hid_kb_layout_t *layout,
+                            const uint8_t *data, size_t len,
+                            uint8_t *mod_out, uint8_t *keys_out, int max_keys);
 
 #ifdef __cplusplus
 }

@@ -25,6 +25,7 @@
 #include "storage.h"
 #include "ch9329.h"
 #include "ble_hid_host.h"
+#include "key_state.h"
 #include "button.h"
 #include "led_status.h"
 
@@ -39,7 +40,8 @@ static const char *TAG = "MAIN";
 // press (or after connecting), without ever blocking the input path.
 static esp_timer_handle_t s_led_poll_timer = NULL;
 
-static uint8_t s_prev_keys[6] = {0};
+static uint8_t s_prev_keys[KEY_STATE_MAX_KEYS] = {0};
+static int s_prev_key_count = 0;
 
 /* ============================================================================
  * LED state polling
@@ -59,9 +61,9 @@ static void schedule_led_poll(uint32_t delay_ms)
     esp_timer_start_once(s_led_poll_timer, (uint64_t)delay_ms * 1000);
 }
 
-static bool has_key(const uint8_t *keys, uint8_t key_code)
+static bool has_key(const uint8_t *keys, int count, uint8_t key_code)
 {
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < count; i++) {
         if (keys[i] == key_code) {
             return true;
         }
@@ -69,14 +71,16 @@ static bool has_key(const uint8_t *keys, uint8_t key_code)
     return false;
 }
 
-static bool lock_key_just_pressed(const uint8_t *curr, const uint8_t *prev)
+static bool lock_key_just_pressed(const uint8_t *curr, int curr_count,
+                                  const uint8_t *prev, int prev_count)
 {
     static const uint8_t lock_keys[] = {
         HID_KEY_CAPS_LOCK, HID_KEY_NUM_LOCK, HID_KEY_SCROLL_LOCK
     };
 
     for (size_t i = 0; i < sizeof(lock_keys); i++) {
-        if (has_key(curr, lock_keys[i]) && !has_key(prev, lock_keys[i])) {
+        if (has_key(curr, curr_count, lock_keys[i]) &&
+            !has_key(prev, prev_count, lock_keys[i])) {
             return true;
         }
     }
@@ -88,18 +92,28 @@ static bool lock_key_just_pressed(const uint8_t *curr, const uint8_t *prev)
  * ============================================================================ */
 
 /**
- * @brief Keyboard report from BLE (8-byte boot format). Runs on NimBLE host
- *        task - keep it non-blocking.
+ * @brief Keyboard state from BLE. Runs on NimBLE host task - non-blocking.
+ *
+ * The device's keys are handed to the merge layer, which recomputes the whole
+ * boot report. Sending the device's own report straight through would drop a
+ * modifier held on a different keyboard once more than one is supported.
  */
-static void on_keyboard_report(const uint8_t report[8])
+static void on_keyboard_report(int device, uint8_t modifiers,
+                               const uint8_t *keys, int count)
 {
-    ch9329_send_keyboard_report(report);
+    key_state_device_update(device, modifiers, keys, count);
 
-    const uint8_t *curr_keys = &report[2];
-    if (lock_key_just_pressed(curr_keys, s_prev_keys)) {
+    uint8_t boot[8];
+    if (key_state_build_report(boot)) {
+        ch9329_send_keyboard_report(boot);
+    }
+
+    if (lock_key_just_pressed(keys, count, s_prev_keys, s_prev_key_count)) {
         schedule_led_poll(LED_POLL_AFTER_KEY_MS);
     }
-    memcpy(s_prev_keys, curr_keys, 6);
+
+    s_prev_key_count = count < KEY_STATE_MAX_KEYS ? count : KEY_STATE_MAX_KEYS;
+    memcpy(s_prev_keys, keys, s_prev_key_count);
 }
 
 /**
@@ -140,6 +154,8 @@ static void on_ble_state_change(ble_hid_state_t state)
         led_status_set(LED_STATUS_CONNECTED);
         // Clean slate on the USB side, then sync LED state
         memset(s_prev_keys, 0, sizeof(s_prev_keys));
+        s_prev_key_count = 0;
+        key_state_reset();
         ch9329_release_all_keys();
         ch9329_send_consumer_usages(NULL, 0);
         ch9329_send_system_usages(NULL, 0);
@@ -155,6 +171,7 @@ static void on_ble_state_change(ble_hid_state_t state)
 
     if (state != BLE_HID_STATE_CONNECTED) {
         // Never leave keys held on the PC when the link is not up
+        key_state_reset();
         ch9329_release_all_keys();
         ch9329_send_consumer_usages(NULL, 0);
         ch9329_send_system_usages(NULL, 0);
