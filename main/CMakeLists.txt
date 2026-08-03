@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "ble_hid_host.c"
         "hid_parser.c"
+        "key_state.c"
         "ch9329.c"
         "storage.c"
         "button.c"

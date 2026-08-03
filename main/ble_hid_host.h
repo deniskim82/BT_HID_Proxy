@@ -28,11 +28,23 @@ typedef enum {
 } ble_hid_state_t;
 
 /**
- * @brief Keyboard report callback: 8-byte boot report [mod, 0, k1..k6]
+ * @brief Keyboard state callback.
+ *
+ * Reports the modifiers and every keycode currently held on one source
+ * device - not a boot report, and not truncated to six keys. Merging the
+ * devices and capping to the boot report's six slots happens in key_state.
+ *
+ * @param device  Source device index (always 0 while a single keyboard is
+ *                supported; the parameter is here so the merge layer and its
+ *                callers do not have to change when more are added)
+ * @param modifiers Modifier byte from that device
+ * @param keys      Keycodes currently held on that device
+ * @param count     Number of entries in @p keys
  *
  * Called from the NimBLE host task; must not block.
  */
-typedef void (*ble_hid_keyboard_cb_t)(const uint8_t report[8]);
+typedef void (*ble_hid_keyboard_cb_t)(int device, uint8_t modifiers,
+                                      const uint8_t *keys, int count);
 
 typedef void (*ble_hid_state_cb_t)(ble_hid_state_t state);
 
