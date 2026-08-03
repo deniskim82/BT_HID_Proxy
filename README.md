@@ -16,8 +16,9 @@ This project enables using a BLE keyboard with PCs that don't have Bluetooth sup
 
 > **Note:** This is a BLE-only rewrite (NimBLE stack). Classic Bluetooth keyboards
 > are not supported. Virtually every keyboard sold in the last decade supports BLE;
-> BLE also gives lower input latency (7.5 ms connection interval) and far more
+> BLE also gives lower input latency (7.5–15 ms connection interval) and far more
 > reliable reconnection than the previous dual-mode (Bluedroid) implementation.
+> See [Technical Specifications](#technical-specifications) for exact numbers.
 
 ## Hardware
 
@@ -51,8 +52,11 @@ This project enables using a BLE keyboard with PCs that don't have Bluetooth sup
   forwarded - media/vendor/battery reports can never be misinterpreted as
   keystrokes (this was the root cause of the old "random key repeats forever
   after reconnection" bug)
-- **NKRO support**: bitmap-style (N-key rollover) reports are translated to
-  standard 6KRO boot reports
+- **NKRO support on the source side**: the keyboard may run in either 6KRO or
+  NKRO mode with no difference in behavior — both are normalized to a key list
+  before the six-key cap is applied. The USB side is still limited to 6
+  simultaneous non-modifier keys, a hard protocol limit of the CH9329 (see
+  [Technical Specifications](#technical-specifications))
 - **Boot protocol fallback** for keyboards with unusual report maps
 - **Auto-reconnect**: alternates between scanning for the keyboard's
   advertisements and direct connection attempts
@@ -232,6 +236,33 @@ Standard 8-byte boot format:
 | Occasional dropped keys | Concurrent `uart_write_bytes` from several tasks interleaved frame bytes; CH9329 discarded corrupted frames | Single TX task + queue serializes all UART writes |
 | Input lag after Caps/Num/Scroll | `vTaskDelay(50)` inside the BT input callback stalled the event queue | LED polling moved to a one-shot esp_timer; input path never blocks |
 | Sporadic freeze/reboot | Unaligned `*(uint64_t *)` read of report data (Xtensa LoadStoreAlignment exception) | Plain `memcmp` on the TX task |
+| Holding several keys retyped the whole chord over and over (e.g. `asdfg` repeating) | A keyboard exposing both a 6KRO and an NKRO report had both merged into the same state slot; whichever report was momentarily idle kept wiping the active one's keys | Each subscribed report is tracked as its own source in the merge layer (`key_state.c`) |
+
+## Technical Specifications
+
+| Item | Value |
+|---|---|
+| BLE protocol version | **Bluetooth 4.2** — the original ESP32's radio implements the BLE 4.2 spec. It has passed Bluetooth SIG's BLE 5.0 *certification* for backward compatibility, but does not implement 5.0-only features (2M PHY, Extended Advertising, LE Coded PHY / Long Range) |
+| Connection interval | 7.5–15 ms, requested range (`ble_hid_host.c`); the keyboard negotiates the exact value within it |
+| Input rate ceiling | ~67–133 Hz — set entirely by the BLE connection interval, not by the UART link (see latency breakdown below) |
+| Keys to the PC | **6 simultaneous non-modifier keys (6KRO)** — a hard limit of the CH9329's keyboard command (0x02), which takes an 8-byte boot report. Modifiers (Ctrl/Shift/Alt/GUI) live in a separate byte and are never affected by this limit |
+| Source keyboard rollover | 6KRO or NKRO, either works identically — see NKRO support above |
+| UART link (ESP32 ↔ CH9329) | 115200 baud, 8 data bits, no parity, 1 stop bit, no flow control |
+| UART bandwidth used | ~16% at the input rate ceiling (a 14-byte frame costs ~1.2 ms against an ~11.5 kB/s link) |
+| Pairing security | LE Secure Connections (LESC), Passkey Entry with MITM protection |
+| Simultaneous keyboards | 1 (see `CLAUDE.md` for what raising this would take) |
+
+### Estimated end-to-end input latency
+
+Estimated from protocol timings, not a bench measurement:
+
+| Stage | Latency | Notes |
+|---|---|---|
+| BLE air interface | 7.5–15 ms | One connection interval, keyboard → ESP32 |
+| ESP32 processing (parse, merge, queue) | <0.1 ms | Never blocks; no delay is ever inserted on this path |
+| UART frame (14 bytes @ 115200) | ~1.2 ms | Header(5) + data(8) + checksum(1) |
+| CH9329 internal processing → USB | a few ms | Not specified in the datasheet; typical for a Full-Speed HID interrupt endpoint |
+| **Total (approximate)** | **~10–20 ms** | Comparable to a typical RF-dongle wireless keyboard, well under the ~200 ms most people notice as lag |
 
 ## References
 
