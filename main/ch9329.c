@@ -27,6 +27,8 @@ typedef enum {
     TX_MSG_RELEASE_ALL,     // Force-send empty report, reset dedup state
     TX_MSG_INFO_REQUEST,    // GET_INFO command
     TX_MSG_PARA_REQUEST,    // GET_PARA_CFG command
+    TX_MSG_MEDIA,           // Consumer (media) key bitmap
+    TX_MSG_ACPI,            // System control bitmap
 } tx_msg_type_t;
 
 typedef struct {
@@ -126,6 +128,37 @@ static void tx_task(void *pvParameters)
         case TX_MSG_PARA_REQUEST:
             send_frame(CH9329_CMD_GET_PARA_CFG, NULL, 0);
             break;
+
+        case TX_MSG_MEDIA: {
+            // [report id 0x02][3 bitmap bytes]
+            static uint8_t last[3] = {0};
+            static bool last_valid = false;
+            if (last_valid && memcmp(msg.data, last, 3) == 0) {
+                break;
+            }
+            uint8_t payload[4] = {0x02, msg.data[0], msg.data[1], msg.data[2]};
+            send_frame(CH9329_CMD_MEDIA, payload, sizeof(payload));
+            memcpy(last, msg.data, 3);
+            last_valid = true;
+            ESP_LOGD(TAG, "TX MEDIA: %02X %02X %02X",
+                     msg.data[0], msg.data[1], msg.data[2]);
+            break;
+        }
+
+        case TX_MSG_ACPI: {
+            // [report id 0x01][1 bitmap byte]
+            static uint8_t last = 0;
+            static bool last_valid = false;
+            if (last_valid && msg.data[0] == last) {
+                break;
+            }
+            uint8_t payload[2] = {0x01, msg.data[0]};
+            send_frame(CH9329_CMD_MEDIA, payload, sizeof(payload));
+            last = msg.data[0];
+            last_valid = true;
+            ESP_LOGD(TAG, "TX ACPI: %02X", msg.data[0]);
+            break;
+        }
         }
     }
 
@@ -604,6 +637,85 @@ esp_err_t ch9329_request_led_status(void)
 esp_err_t ch9329_request_info(void)
 {
     tx_msg_t msg = { .type = TX_MSG_INFO_REQUEST };
+    return enqueue_msg(&msg);
+}
+
+/**
+ * @brief HID consumer usage -> CH9329 multimedia bitmap position.
+ *
+ * The CH9329 exposes a fixed set of media functions rather than the full
+ * consumer page, so anything without an entry here has no equivalent to send
+ * and is dropped rather than guessed at.
+ */
+static const struct {
+    uint16_t usage;
+    uint8_t byte;
+    uint8_t bit;
+} k_media_map[] = {
+    /* byte 0 - transport and volume */
+    { 0x00E9, 0, 0 },   // Volume Increment
+    { 0x00EA, 0, 1 },   // Volume Decrement
+    { 0x00E2, 0, 2 },   // Mute
+    { 0x00CD, 0, 3 },   // Play/Pause
+    { 0x00B5, 0, 4 },   // Scan Next Track
+    { 0x00B6, 0, 5 },   // Scan Previous Track
+    { 0x00B7, 0, 6 },   // Stop
+    { 0x00B8, 0, 7 },   // Eject
+    /* byte 1 - browser */
+    { 0x018A, 1, 0 },   // AL Email Reader
+    { 0x0221, 1, 1 },   // AC Search
+    { 0x022A, 1, 2 },   // AC Bookmarks
+    { 0x0223, 1, 3 },   // AC Home
+    { 0x0224, 1, 4 },   // AC Back
+    { 0x0225, 1, 5 },   // AC Forward
+    { 0x0226, 1, 6 },   // AC Stop
+    { 0x0227, 1, 7 },   // AC Refresh
+    /* byte 2 - applications */
+    { 0x0183, 2, 0 },   // AL Consumer Control Configuration (Media)
+    { 0x0192, 2, 2 },   // AL Calculator
+    { 0x019E, 2, 3 },   // AL Terminal Lock / Screen Saver
+    { 0x0194, 2, 4 },   // AL Local Machine Browser (My Computer)
+    { 0x00B2, 2, 6 },   // Record
+    { 0x00B4, 2, 7 },   // Rewind
+};
+
+esp_err_t ch9329_send_consumer_usages(const uint16_t *usages, int count)
+{
+    tx_msg_t msg = { .type = TX_MSG_MEDIA };
+
+    for (int i = 0; i < count; i++) {
+        bool mapped = false;
+        for (size_t m = 0; m < sizeof(k_media_map) / sizeof(k_media_map[0]); m++) {
+            if (k_media_map[m].usage == usages[i]) {
+                msg.data[k_media_map[m].byte] |= (1u << k_media_map[m].bit);
+                mapped = true;
+                break;
+            }
+        }
+        if (!mapped) {
+            ESP_LOGD(TAG, "Consumer usage 0x%04X has no CH9329 equivalent",
+                     usages[i]);
+        }
+    }
+
+    return enqueue_msg(&msg);
+}
+
+esp_err_t ch9329_send_system_usages(const uint16_t *usages, int count)
+{
+    tx_msg_t msg = { .type = TX_MSG_ACPI };
+
+    for (int i = 0; i < count; i++) {
+        switch (usages[i]) {
+        case 0x0081: msg.data[0] |= 0x01; break;    // System Power Down
+        case 0x0082: msg.data[0] |= 0x02; break;    // System Sleep
+        case 0x0083: msg.data[0] |= 0x04; break;    // System Wake Up
+        default:
+            ESP_LOGD(TAG, "System usage 0x%04X not supported", usages[i]);
+            break;
+        }
+    }
+
     return enqueue_msg(&msg);
 }
 

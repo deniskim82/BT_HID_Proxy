@@ -96,6 +96,7 @@ static uint8_t s_own_addr_type;
 
 static ble_hid_keyboard_cb_t s_keyboard_cb = NULL;
 static ble_hid_state_cb_t s_state_cb = NULL;
+static ble_hid_ext_cb_t s_ext_cb = NULL;
 
 static volatile ble_hid_state_t s_state = BLE_HID_STATE_IDLE;
 
@@ -134,10 +135,11 @@ static hid_report_map_info_t s_map_info;
 typedef struct {
     uint16_t val_handle;
     uint16_t ccc_handle;
-    const hid_kb_layout_t *layout;  // NULL => boot protocol report
+    const hid_kb_layout_t *layout;  // keyboard report (NULL => see ext/boot)
+    const hid_ext_layout_t *ext;    // consumer / system control report
 } kb_sub_t;
 
-static kb_sub_t s_subs[HID_MAX_KB_REPORTS + 1];
+static kb_sub_t s_subs[HID_MAX_KB_REPORTS + HID_MAX_EXT_REPORTS + 1];
 static volatile int s_num_subs = 0;
 static int s_sub_idx = 0;
 
@@ -532,11 +534,19 @@ static int subscribe_cb(uint16_t conn_handle, const struct ble_gatt_error *error
                  s_subs[s_sub_idx].val_handle, error->status);
         s_subs[s_sub_idx].val_handle = 0;
     } else {
+        const kb_sub_t *sub = &s_subs[s_sub_idx];
+        const char *what = "boot keyboard";
+        uint8_t rid = 0;
+        if (sub->layout != NULL) {
+            rid = sub->layout->report_id;
+            what = (sub->layout->keys_kind == HID_KEYS_ARRAY) ? "keyboard array"
+                                                             : "keyboard bitmap";
+        } else if (sub->ext != NULL) {
+            rid = sub->ext->report_id;
+            what = (sub->ext->kind == HID_EXT_CONSUMER) ? "consumer" : "system";
+        }
         ESP_LOGI(TAG, "Subscribed: handle=%d report_id=%d (%s)",
-                 s_subs[s_sub_idx].val_handle,
-                 s_subs[s_sub_idx].layout ? s_subs[s_sub_idx].layout->report_id : 0,
-                 s_subs[s_sub_idx].layout == NULL ? "boot" :
-                 (s_subs[s_sub_idx].layout->keys_kind == HID_KEYS_ARRAY ? "array" : "bitmap"));
+                 sub->val_handle, rid, what);
     }
 
     s_sub_idx++;
@@ -637,6 +647,26 @@ static void configure_reports(void)
         s_num_subs++;
     }
 
+    // Media / system control reports: forwarded so volume, playback and
+    // power keys work like they would on a directly attached keyboard.
+    for (int i = 0; i < s_num_chrs &&
+                    s_num_subs < (int)(sizeof(s_subs) / sizeof(s_subs[0])); i++) {
+        hid_chr_t *c = &s_chrs[i];
+        if (c->uuid16 != UUID_CHR_REPORT ||
+            c->report_type != REPORT_TYPE_INPUT || c->ccc_handle == 0) {
+            continue;
+        }
+        const hid_ext_layout_t *ext = hid_parser_find_ext(&s_map_info, c->report_id);
+        if (ext == NULL) {
+            continue;
+        }
+        s_subs[s_num_subs].val_handle = c->val_handle;
+        s_subs[s_num_subs].ccc_handle = c->ccc_handle;
+        s_subs[s_num_subs].layout = NULL;
+        s_subs[s_num_subs].ext = ext;
+        s_num_subs++;
+    }
+
     // Devices that use a single report without report IDs may omit the Report
     // Reference descriptor entirely.
     if (s_num_subs == 0 && s_map_info.num_kbs == 1 && s_map_info.kbs[0].report_id == 0) {
@@ -726,6 +756,22 @@ static void handle_input_notification(const kb_sub_t *sub, struct os_mbuf *om)
         len = sizeof(raw);
     }
     os_mbuf_copydata(om, 0, len, raw);
+
+    if (sub->ext != NULL) {
+        uint16_t usages[8];
+        int n = hid_parser_extract_usages(sub->ext, raw, len, usages,
+                                          sizeof(usages) / sizeof(usages[0]));
+        if (s_input_log_budget > 0) {
+            s_input_log_budget--;
+            ESP_LOGI(TAG, "IN %s handle=%d len=%d usages=%d first=0x%04X",
+                     sub->ext->kind == HID_EXT_CONSUMER ? "consumer" : "system",
+                     sub->val_handle, len, n, n > 0 ? usages[0] : 0);
+        }
+        if (s_ext_cb) {
+            s_ext_cb(sub->ext->kind == HID_EXT_SYSTEM, usages, n);
+        }
+        return;
+    }
 
     uint8_t boot[8];
 
@@ -1140,6 +1186,11 @@ static void ctrl_task(void *param)
 /* ============================================================================
  * Public API
  * ============================================================================ */
+
+void ble_hid_host_set_ext_cb(ble_hid_ext_cb_t cb)
+{
+    s_ext_cb = cb;
+}
 
 esp_err_t ble_hid_host_init(ble_hid_keyboard_cb_t keyboard_cb, ble_hid_state_cb_t state_cb)
 {

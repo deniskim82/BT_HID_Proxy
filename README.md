@@ -4,6 +4,8 @@
 
 BLE Keyboard to USB HID Proxy using ESP32 and CH9329.
 
+*[한국어 문서](README.ko.md)*
+
 ## Overview
 
 This project enables using a BLE keyboard with PCs that don't have Bluetooth support. The ESP32 acts as a BLE HID (HOGP) Host, receiving keyboard input from a bonded BLE keyboard and forwarding it to a PC via the CH9329 UART-to-USB-HID converter chip.
@@ -58,6 +60,8 @@ This project enables using a BLE keyboard with PCs that don't have Bluetooth sup
 - **Re-pairing resilience**: if the keyboard dropped its bond (e.g. its pairing
   slot was reused on another host), the proxy detects it and re-pairs
   automatically
+- **Media and system keys**: volume, mute, play/pause, track skip, browser and
+  application shortcuts, plus power/sleep/wake
 - **LED state sync**: Caps/Num/Scroll lock state from the PC is forwarded to
   the keyboard, polled without ever blocking the input path
 - **Key release safety**: all keys are released on the USB side whenever the
@@ -189,8 +193,30 @@ No blocking calls (delays, log-heavy paths) exist anywhere on the input path.
 ```
 [0x57][0xAB][ADDR][CMD][LEN][DATA...][CHECKSUM]
 ```
-- **Command**: `0x02` keyboard report, `0x0D` get LED status
-- **Checksum**: Sum of all bytes mod 256
+
+| Command | Meaning |
+|---|---|
+| 0x01 | GET_INFO (chip version, USB enumeration state, LED state) |
+| 0x02 | Keyboard report |
+| 0x03 | Media / system control keys |
+| 0x08 | Read stored configuration |
+| 0x0D | **RESET** — not a LED query, see below |
+
+Checksum is the sum of all preceding bytes, mod 256.
+
+> **Trap:** `0x0D` is the reset command. Earlier firmware mistook it for "get
+> LED status" and sent it on every connection and every lock-key press, which
+> reset the CH9329 and dropped its USB enumeration — surfacing on Windows as
+> *"Unknown USB Device (Device Descriptor Request Failed)"*. LED state is
+> carried in the `GET_INFO` (0x01) reply instead.
+
+### Media key translation
+
+The CH9329 takes a fixed bitmap rather than HID usage codes, so consumer-page
+usages reported by the keyboard are translated to CH9329 bit positions
+(volume, mute, transport, browser and application keys, plus power/sleep/wake).
+Usages with no CH9329 equivalent — screen brightness, for instance — are
+dropped rather than guessed at.
 
 ### USB HID Keyboard Report
 Standard 8-byte boot format:
@@ -217,9 +243,9 @@ Standard 8-byte boot format:
 
 - [x] RGB LED status indication
 - [x] LED (Caps/Num/Scroll) state sync
-- [ ] Media key support (consumer control report -> CH9329 multimedia command)
+- [x] Media key support (consumer control report -> CH9329 multimedia command)
+- [ ] Mouse input support (for keyboards with a trackpoint or touchpad)
 - [ ] Multiple paired device storage
-- [ ] Mouse input support
 - [ ] OTA firmware update
 
 ## License

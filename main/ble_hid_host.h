@@ -37,6 +37,25 @@ typedef void (*ble_hid_keyboard_cb_t)(const uint8_t report[8]);
 typedef void (*ble_hid_state_cb_t)(ble_hid_state_t state);
 
 /**
+ * @brief Non-keyboard usage report callback (media / system control keys).
+ *
+ * @param is_system true for system control (power/sleep/wake), false for
+ *                  consumer page (media, browser, application keys)
+ * @param usages    currently pressed usage codes (empty = all released)
+ * @param count     number of usages
+ *
+ * Called from the NimBLE host task; must not block.
+ */
+typedef void (*ble_hid_ext_cb_t)(bool is_system, const uint16_t *usages, int count);
+
+/**
+ * @brief Register the media / system control key callback (optional).
+ *
+ * Must be called before ble_hid_host_init().
+ */
+void ble_hid_host_set_ext_cb(ble_hid_ext_cb_t cb);
+
+/**
  * @brief Initialize the BLE stack and start the connection manager task.
  *
  * If a bonded keyboard is stored in NVS, reconnection starts automatically.
