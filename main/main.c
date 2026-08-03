@@ -111,6 +111,19 @@ static void on_pc_led_status(uint8_t led_status)
     ble_hid_host_send_led_status(led_status);
 }
 
+/**
+ * @brief Media / system control keys from the keyboard.
+ *        Runs on the NimBLE host task - non-blocking.
+ */
+static void on_ext_keys(bool is_system, const uint16_t *usages, int count)
+{
+    if (is_system) {
+        ch9329_send_system_usages(usages, count);
+    } else {
+        ch9329_send_consumer_usages(usages, count);
+    }
+}
+
 static void on_ble_state_change(ble_hid_state_t state)
 {
     switch (state) {
@@ -128,6 +141,8 @@ static void on_ble_state_change(ble_hid_state_t state)
         // Clean slate on the USB side, then sync LED state
         memset(s_prev_keys, 0, sizeof(s_prev_keys));
         ch9329_release_all_keys();
+        ch9329_send_consumer_usages(NULL, 0);
+        ch9329_send_system_usages(NULL, 0);
         schedule_led_poll(LED_POLL_AFTER_CONNECT_MS);
         break;
     case BLE_HID_STATE_PAIRING:
@@ -141,6 +156,8 @@ static void on_ble_state_change(ble_hid_state_t state)
     if (state != BLE_HID_STATE_CONNECTED) {
         // Never leave keys held on the PC when the link is not up
         ch9329_release_all_keys();
+        ch9329_send_consumer_usages(NULL, 0);
+        ch9329_send_system_usages(NULL, 0);
     }
 }
 
@@ -209,6 +226,7 @@ static esp_err_t init_all(void)
     }
 
     // BLE last: reconnection starts immediately if a bonded keyboard exists
+    ble_hid_host_set_ext_cb(on_ext_keys);
     ret = ble_hid_host_init(on_keyboard_report, on_ble_state_change);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "BLE HID host init failed: %s", esp_err_to_name(ret));

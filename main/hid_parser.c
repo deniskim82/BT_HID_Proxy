@@ -19,12 +19,21 @@ static const char *TAG = "HID_PARSER";
 #define ITEM_FEATURE        0xB0
 #define ITEM_COLLECTION     0xA0
 #define ITEM_END_COLLECTION 0xC0
+#define ITEM_USAGE          0x08
 #define ITEM_USAGE_MIN      0x18
 #define ITEM_USAGE_MAX      0x28
 #define ITEM_LONG           0xFC
 
+#define USAGE_PAGE_GEN_DESKTOP 0x01
 #define USAGE_PAGE_KEYBOARD 0x07
 #define USAGE_PAGE_LED      0x08
+#define USAGE_PAGE_CONSUMER 0x0C
+
+#define MAIN_ITEM_VARIABLE  0x02
+
+/* System control usages live in this Generic Desktop range (Power/Sleep/Wake) */
+#define SYSTEM_USAGE_MIN    0x81
+#define SYSTEM_USAGE_MAX    0xB7
 
 #define MAIN_ITEM_CONSTANT  0x01
 
@@ -70,6 +79,24 @@ static hid_kb_layout_t *layout_get(hid_report_map_info_t *out, uint8_t report_id
     return NULL;
 }
 
+static hid_ext_layout_t *ext_get(hid_report_map_info_t *out, uint8_t report_id,
+                                 hid_ext_kind_t kind)
+{
+    for (int i = 0; i < out->num_exts; i++) {
+        if (out->exts[i].report_id == report_id && out->exts[i].kind == kind) {
+            return &out->exts[i];
+        }
+    }
+    if (out->num_exts < HID_MAX_EXT_REPORTS) {
+        hid_ext_layout_t *e = &out->exts[out->num_exts++];
+        memset(e, 0, sizeof(*e));
+        e->report_id = report_id;
+        e->kind = kind;
+        return e;
+    }
+    return NULL;
+}
+
 bool hid_parser_parse_report_map(const uint8_t *desc, size_t desc_len,
                                  hid_report_map_info_t *out)
 {
@@ -88,6 +115,12 @@ bool hid_parser_parse_report_map(const uint8_t *desc, size_t desc_len,
     // Local state (reset after each main item)
     uint32_t usage_min = 0;
     bool usage_min_set = false;
+
+    // Explicit Usage() items. Descriptors commonly enumerate the usages one by
+    // one and then give a Usage Minimum of 1 rather than the real first usage,
+    // so the explicit list has to win when it is present.
+    uint32_t usages[8];
+    int num_usages = 0;
 
     report_cursor_t in_cursors[MAX_TRACKED_REPORTS];
     int in_cursor_count = 0;
@@ -133,6 +166,11 @@ bool hid_parser_parse_report_map(const uint8_t *desc, size_t desc_len,
         case ITEM_REPORT_COUNT:
             report_count = value;
             break;
+        case ITEM_USAGE:
+            if (num_usages < (int)(sizeof(usages) / sizeof(usages[0]))) {
+                usages[num_usages++] = value;
+            }
+            break;
         case ITEM_USAGE_MIN:
             usage_min = value;
             usage_min_set = true;
@@ -170,7 +208,62 @@ bool hid_parser_parse_report_map(const uint8_t *desc, size_t desc_len,
                     }
                 }
 
+                if (!constant) {
+                    hid_ext_kind_t kind = HID_EXT_NONE;
+
+                    if (usage_page == USAGE_PAGE_CONSUMER) {
+                        kind = HID_EXT_CONSUMER;
+                    } else if (usage_page == USAGE_PAGE_GEN_DESKTOP) {
+                        // Generic Desktop also covers mouse axes, so only the
+                        // system-control usage range qualifies. Check the
+                        // explicit usages first - descriptors often list
+                        // 0x81/0x82/0x83 and then declare Usage Minimum 1.
+                        for (int u = 0; u < num_usages; u++) {
+                            if (usages[u] >= SYSTEM_USAGE_MIN &&
+                                usages[u] <= SYSTEM_USAGE_MAX) {
+                                kind = HID_EXT_SYSTEM;
+                                break;
+                            }
+                        }
+                        if (kind == HID_EXT_NONE && usage_min_set &&
+                            usage_min >= SYSTEM_USAGE_MIN &&
+                            usage_min <= SYSTEM_USAGE_MAX) {
+                            kind = HID_EXT_SYSTEM;
+                        }
+                    }
+
+                    if (kind != HID_EXT_NONE) {
+                        hid_ext_layout_t *e = ext_get(out, report_id, kind);
+                        if (e != NULL && e->count == 0) {
+                            bool variable = (value & MAIN_ITEM_VARIABLE) != 0;
+                            if (variable && report_size == 1) {
+                                e->is_bitmap = true;
+                                e->count = (uint16_t)report_count;
+                                // Explicit usages win: Usage Minimum is often
+                                // a placeholder like 1 in these descriptors.
+                                e->usage_min = (num_usages > 0) ? usages[0]
+                                             : (usage_min_set ? usage_min : 0);
+                            } else if (!variable &&
+                                       (report_size == 8 || report_size == 16)) {
+                                e->is_bitmap = false;
+                                e->count = (uint16_t)report_count;
+                                e->item_bits = (uint16_t)report_size;
+                            }
+                            if (e->count != 0) {
+                                e->bit_offset = *cursor;
+                                e->valid = true;
+                            }
+                        }
+                    }
+                }
+
                 *cursor += report_size * report_count;
+
+                for (int i = 0; i < out->num_exts; i++) {
+                    if (out->exts[i].report_id == report_id) {
+                        out->exts[i].report_bits = *cursor;
+                    }
+                }
 
                 hid_kb_layout_t *kb = NULL;
                 for (int i = 0; i < out->num_kbs; i++) {
@@ -185,6 +278,7 @@ bool hid_parser_parse_report_map(const uint8_t *desc, size_t desc_len,
             }
 
             usage_min_set = false;
+            num_usages = 0;
             break;
         }
 
@@ -202,6 +296,7 @@ bool hid_parser_parse_report_map(const uint8_t *desc, size_t desc_len,
             }
 
             usage_min_set = false;
+            num_usages = 0;
             break;
         }
 
@@ -209,6 +304,7 @@ bool hid_parser_parse_report_map(const uint8_t *desc, size_t desc_len,
         case ITEM_COLLECTION:
         case ITEM_END_COLLECTION:
             usage_min_set = false;
+            num_usages = 0;
             break;
 
         default:
@@ -244,6 +340,27 @@ bool hid_parser_parse_report_map(const uint8_t *desc, size_t desc_len,
                  kb->keys_usage_min, kb->report_bits);
     }
 
+    int ext_kept = 0;
+    for (int i = 0; i < out->num_exts; i++) {
+        if (out->exts[i].valid && out->exts[i].count > 0) {
+            if (ext_kept != i) {
+                out->exts[ext_kept] = out->exts[i];
+            }
+            ext_kept++;
+        }
+    }
+    out->num_exts = ext_kept;
+
+    for (int i = 0; i < out->num_exts; i++) {
+        const hid_ext_layout_t *e = &out->exts[i];
+        ESP_LOGI(TAG, "  ext[%d] id=%u %s %s off=%u count=%u item_bits=%u min=0x%02X",
+                 i, e->report_id,
+                 e->kind == HID_EXT_CONSUMER ? "consumer" : "system",
+                 e->is_bitmap ? "bitmap" : "array",
+                 e->bit_offset, e->count, e->item_bits,
+                 (unsigned)e->usage_min);
+    }
+
     if (out->has_led_output) {
         ESP_LOGI(TAG, "  LED output report id=%u", out->led_report_id);
     }
@@ -267,6 +384,67 @@ const hid_kb_layout_t *hid_parser_find_layout(const hid_report_map_info_t *info,
         }
     }
     return NULL;
+}
+
+const hid_ext_layout_t *hid_parser_find_ext(const hid_report_map_info_t *info,
+                                            uint8_t report_id)
+{
+    if (info == NULL) {
+        return NULL;
+    }
+    for (int i = 0; i < info->num_exts; i++) {
+        if (info->exts[i].valid && info->exts[i].report_id == report_id) {
+            return &info->exts[i];
+        }
+    }
+    return NULL;
+}
+
+int hid_parser_extract_usages(const hid_ext_layout_t *layout,
+                              const uint8_t *data, size_t len,
+                              uint16_t *out, int max_out)
+{
+    if (layout == NULL || !layout->valid || data == NULL || out == NULL) {
+        return 0;
+    }
+
+    int n = 0;
+
+    if (layout->is_bitmap) {
+        for (uint16_t i = 0; i < layout->count && n < max_out; i++) {
+            size_t bit = layout->bit_offset + i;
+            size_t byte = bit / 8;
+            if (byte >= len) {
+                break;
+            }
+            if (data[byte] & (1u << (bit % 8))) {
+                out[n++] = (uint16_t)(layout->usage_min + i);
+            }
+        }
+        return n;
+    }
+
+    // Array of usage codes; zero means "no key"
+    if ((layout->bit_offset % 8) != 0) {
+        return 0;
+    }
+    size_t pos = layout->bit_offset / 8;
+    size_t step = layout->item_bits / 8;
+
+    for (uint16_t i = 0; i < layout->count && n < max_out; i++) {
+        size_t off = pos + (size_t)i * step;
+        if (off + step > len) {
+            break;
+        }
+        uint16_t usage = data[off];
+        if (step == 2) {
+            usage |= (uint16_t)data[off + 1] << 8;   // little-endian
+        }
+        if (usage != 0) {
+            out[n++] = usage;
+        }
+    }
+    return n;
 }
 
 static inline uint8_t get_byte_at_bit(const uint8_t *data, size_t len, uint16_t bit_offset)

@@ -26,6 +26,7 @@ extern "C" {
 #define CH9329_ADDR_DEFAULT     0x00
 #define CH9329_CMD_GET_INFO     0x01
 #define CH9329_CMD_KEYBOARD     0x02
+#define CH9329_CMD_MEDIA        0x03
 #define CH9329_CMD_GET_PARA_CFG 0x08
 /* NOTE: 0x0D is CMD_RESET on this chip, NOT a "get LED" command. The CH9329
  * has no dedicated LED query - the host's Caps/Num/Scroll state is carried in
@@ -70,6 +71,23 @@ esp_err_t ch9329_send_keyboard_report(const uint8_t data[8]);
  * sent report was already empty.
  */
 esp_err_t ch9329_release_all_keys(void);
+
+/**
+ * @brief Forward the currently pressed consumer-page usages (media, browser
+ *        and application keys).
+ *
+ * The CH9329 does not take usage codes: it defines a fixed bitmap, so the
+ * usages are translated here. Pass count 0 to release everything. Usages with
+ * no CH9329 equivalent are ignored.
+ */
+esp_err_t ch9329_send_consumer_usages(const uint16_t *usages, int count);
+
+/**
+ * @brief Forward system control usages (Power 0x81, Sleep 0x82, Wake 0x83).
+ *
+ * Pass count 0 to release.
+ */
+esp_err_t ch9329_send_system_usages(const uint16_t *usages, int count);
 
 /**
  * @brief Queue a request for the host's LED state.

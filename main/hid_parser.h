@@ -56,9 +56,40 @@ typedef struct {
     uint16_t report_bits;       // Total payload size in bits
 } hid_kb_layout_t;
 
+/** Maximum number of non-keyboard usage reports tracked (consumer + system) */
+#define HID_MAX_EXT_REPORTS 4
+
+typedef enum {
+    HID_EXT_NONE = 0,
+    HID_EXT_CONSUMER,   // Usage page 0x0C - media/browser/application keys
+    HID_EXT_SYSTEM,     // Generic Desktop system control - power/sleep/wake
+} hid_ext_kind_t;
+
+/**
+ * @brief Layout of an input report carrying non-keyboard usages.
+ *
+ * Two encodings occur in practice: an array of usage codes (Report Size 8 or
+ * 16, "Input (Array)"), and a bitmap with one bit per usage.
+ */
+typedef struct {
+    bool valid;
+    uint8_t report_id;
+    hid_ext_kind_t kind;
+
+    bool is_bitmap;
+    uint16_t bit_offset;
+    uint16_t count;       // bitmap: number of bits; array: number of fields
+    uint16_t item_bits;   // array: bits per field (8 or 16)
+    uint32_t usage_min;   // bitmap: usage of bit 0
+    uint16_t report_bits;
+} hid_ext_layout_t;
+
 typedef struct {
     hid_kb_layout_t kbs[HID_MAX_KB_REPORTS];    // Keyboard input report layouts
     int num_kbs;
+
+    hid_ext_layout_t exts[HID_MAX_EXT_REPORTS]; // Consumer / system control
+    int num_exts;
 
     bool has_led_output;
     uint8_t led_report_id;      // Output report carrying LED usages (page 0x08)
@@ -81,6 +112,27 @@ bool hid_parser_parse_report_map(const uint8_t *desc, size_t desc_len,
  */
 const hid_kb_layout_t *hid_parser_find_layout(const hid_report_map_info_t *info,
                                               uint8_t report_id);
+
+/**
+ * @brief Look up a parsed non-keyboard usage report by report ID.
+ * @return NULL if that report ID is not a consumer or system control report
+ */
+const hid_ext_layout_t *hid_parser_find_ext(const hid_report_map_info_t *info,
+                                            uint8_t report_id);
+
+/**
+ * @brief Extract the currently pressed usages from a consumer/system report.
+ *
+ * @param layout   Layout from hid_parser_parse_report_map()
+ * @param data     Raw report payload (without report ID prefix)
+ * @param len      Payload length in bytes
+ * @param out      Receives the active usage codes
+ * @param max_out  Capacity of @p out
+ * @return number of usages written (0 = all keys released)
+ */
+int hid_parser_extract_usages(const hid_ext_layout_t *layout,
+                              const uint8_t *data, size_t len,
+                              uint16_t *out, int max_out);
 
 /**
  * @brief Translate a raw keyboard input report to an 8-byte boot report.
