@@ -31,8 +31,17 @@
 extern "C" {
 #endif
 
-/** Source devices that can be merged */
-#define KEY_STATE_MAX_DEVICES   4
+/**
+ * Independent report sources that can be merged.
+ *
+ * This counts *reports*, not devices: one keyboard commonly exposes both a
+ * 6KRO and an NKRO keyboard report and sends on whichever suits the moment.
+ * Those two carry independent state - while one holds keys the other reads as
+ * empty - so they must not share a slot, or each empty report would wipe the
+ * other's keys and the host would see the whole chord released and pressed
+ * again, over and over.
+ */
+#define KEY_STATE_MAX_SOURCES   8
 
 /** Keys tracked per device before overflow (well above any realistic chord) */
 #define KEY_STATE_MAX_KEYS      16
@@ -46,25 +55,25 @@ extern "C" {
 void key_state_reset(void);
 
 /**
- * @brief Replace one device's currently pressed keys.
+ * @brief Replace one source's currently pressed keys.
  *
- * @param device    Source device index, 0 .. KEY_STATE_MAX_DEVICES-1
- * @param modifiers Modifier byte reported by that device
- * @param keys      Non-modifier keycodes currently held on that device
+ * @param source    Report source index, 0 .. KEY_STATE_MAX_SOURCES-1
+ * @param modifiers Modifier byte carried by that report
+ * @param keys      Non-modifier keycodes currently held in that report
  * @param count     Number of entries in @p keys
  */
-void key_state_device_update(int device, uint8_t modifiers,
+void key_state_source_update(int source, uint8_t modifiers,
                              const uint8_t *keys, int count);
 
 /**
- * @brief Drop a device's contribution entirely (disconnect).
+ * @brief Drop a source's contribution entirely (disconnect).
  */
-void key_state_device_clear(int device);
+void key_state_source_clear(int source);
 
 /**
  * @brief Build the merged 8-byte boot report.
  *
- * Modifiers are OR-ed across devices - so a modifier held on one keyboard
+ * Modifiers are OR-ed across sources - so a modifier held on one keyboard
  * applies to keys typed on another. Keycodes are the union, capped at six.
  *
  * @param out Receives [mod, 0, k1..k6]

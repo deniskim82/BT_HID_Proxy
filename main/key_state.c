@@ -13,7 +13,7 @@ typedef struct {
     int num_keys;
 } device_state_t;
 
-static device_state_t s_devices[KEY_STATE_MAX_DEVICES];
+static device_state_t s_sources[KEY_STATE_MAX_SOURCES];
 
 /* The six boot-report slots. 0 = free. A key keeps its slot until released. */
 static uint8_t s_slots[KEY_STATE_SLOTS];
@@ -24,21 +24,21 @@ static int s_overflow;
 
 void key_state_reset(void)
 {
-    memset(s_devices, 0, sizeof(s_devices));
+    memset(s_sources, 0, sizeof(s_sources));
     memset(s_slots, 0, sizeof(s_slots));
     memset(s_last_report, 0, sizeof(s_last_report));
     s_last_valid = false;
     s_overflow = 0;
 }
 
-void key_state_device_update(int device, uint8_t modifiers,
+void key_state_source_update(int source, uint8_t modifiers,
                              const uint8_t *keys, int count)
 {
-    if (device < 0 || device >= KEY_STATE_MAX_DEVICES) {
+    if (source < 0 || source >= KEY_STATE_MAX_SOURCES) {
         return;
     }
 
-    device_state_t *d = &s_devices[device];
+    device_state_t *d = &s_sources[source];
     d->active = true;
     d->modifiers = modifiers;
     d->num_keys = 0;
@@ -50,18 +50,18 @@ void key_state_device_update(int device, uint8_t modifiers,
     }
 }
 
-void key_state_device_clear(int device)
+void key_state_source_clear(int source)
 {
-    if (device < 0 || device >= KEY_STATE_MAX_DEVICES) {
+    if (source < 0 || source >= KEY_STATE_MAX_SOURCES) {
         return;
     }
-    memset(&s_devices[device], 0, sizeof(s_devices[device]));
+    memset(&s_sources[source], 0, sizeof(s_sources[source]));
 }
 
 static bool key_is_held(uint8_t key)
 {
-    for (int i = 0; i < KEY_STATE_MAX_DEVICES; i++) {
-        const device_state_t *d = &s_devices[i];
+    for (int i = 0; i < KEY_STATE_MAX_SOURCES; i++) {
+        const device_state_t *d = &s_sources[i];
         if (!d->active) {
             continue;
         }
@@ -101,8 +101,8 @@ bool key_state_build_report(uint8_t out[8])
     // disable every key that is currently working, which is worse to use.
     s_overflow = 0;
 
-    for (int i = 0; i < KEY_STATE_MAX_DEVICES; i++) {
-        const device_state_t *d = &s_devices[i];
+    for (int i = 0; i < KEY_STATE_MAX_SOURCES; i++) {
+        const device_state_t *d = &s_sources[i];
         if (!d->active) {
             continue;
         }
@@ -133,9 +133,9 @@ bool key_state_build_report(uint8_t out[8])
     // Modifiers are OR-ed, so one keyboard's held Shift applies to another
     // keyboard's keys. They live in their own byte and never compete for the
     // six key slots.
-    for (int i = 0; i < KEY_STATE_MAX_DEVICES; i++) {
-        if (s_devices[i].active) {
-            report[0] |= s_devices[i].modifiers;
+    for (int i = 0; i < KEY_STATE_MAX_SOURCES; i++) {
+        if (s_sources[i].active) {
+            report[0] |= s_sources[i].modifiers;
         }
     }
 
