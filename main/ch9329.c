@@ -131,32 +131,34 @@ static void tx_task(void *pvParameters)
 
         case TX_MSG_MEDIA: {
             // [report id 0x02][3 bitmap bytes]
+            //
+            // Seeded as "nothing pressed", which is the chip's actual state
+            // after power-on. Without that seed the first call - the release
+            // issued on every BLE connect - put a 0x03 frame on the wire even
+            // though no media key had ever been touched. 0x03 now only goes
+            // out when a media key is genuinely pressed or released.
             static uint8_t last[3] = {0};
-            static bool last_valid = false;
-            if (last_valid && memcmp(msg.data, last, 3) == 0) {
+            if (memcmp(msg.data, last, 3) == 0) {
                 break;
             }
             uint8_t payload[4] = {0x02, msg.data[0], msg.data[1], msg.data[2]};
             send_frame(CH9329_CMD_MEDIA, payload, sizeof(payload));
             memcpy(last, msg.data, 3);
-            last_valid = true;
-            ESP_LOGD(TAG, "TX MEDIA: %02X %02X %02X",
+            ESP_LOGI(TAG, "TX MEDIA: %02X %02X %02X",
                      msg.data[0], msg.data[1], msg.data[2]);
             break;
         }
 
         case TX_MSG_ACPI: {
-            // [report id 0x01][1 bitmap byte]
+            // [report id 0x01][1 bitmap byte] - seeded as released, see above
             static uint8_t last = 0;
-            static bool last_valid = false;
-            if (last_valid && msg.data[0] == last) {
+            if (msg.data[0] == last) {
                 break;
             }
             uint8_t payload[2] = {0x01, msg.data[0]};
             send_frame(CH9329_CMD_MEDIA, payload, sizeof(payload));
             last = msg.data[0];
-            last_valid = true;
-            ESP_LOGD(TAG, "TX ACPI: %02X", msg.data[0]);
+            ESP_LOGI(TAG, "TX ACPI: %02X", msg.data[0]);
             break;
         }
         }
@@ -681,6 +683,10 @@ static const struct {
 
 esp_err_t ch9329_send_consumer_usages(const uint16_t *usages, int count)
 {
+#if !CH9329_ENABLE_MEDIA_KEYS
+    (void)usages; (void)count;
+    return ESP_OK;
+#else
     tx_msg_t msg = { .type = TX_MSG_MEDIA };
 
     for (int i = 0; i < count; i++) {
@@ -699,10 +705,15 @@ esp_err_t ch9329_send_consumer_usages(const uint16_t *usages, int count)
     }
 
     return enqueue_msg(&msg);
+#endif
 }
 
 esp_err_t ch9329_send_system_usages(const uint16_t *usages, int count)
 {
+#if !CH9329_ENABLE_MEDIA_KEYS
+    (void)usages; (void)count;
+    return ESP_OK;
+#else
     tx_msg_t msg = { .type = TX_MSG_ACPI };
 
     for (int i = 0; i < count; i++) {
@@ -717,6 +728,7 @@ esp_err_t ch9329_send_system_usages(const uint16_t *usages, int count)
     }
 
     return enqueue_msg(&msg);
+#endif
 }
 
 esp_err_t ch9329_request_para_cfg(void)
