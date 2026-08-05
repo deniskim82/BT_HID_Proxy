@@ -57,9 +57,15 @@
  * Bluetooth Configuration
  * ============================================================================ */
 
-// Static passkey shown when a keyboard requires Passkey Entry pairing.
-// Type this number on the keyboard when pairing.
-#define BLE_STATIC_PASSKEY      123456
+// Pairing is always passkey-free (Just Works) - see ble_hid_host_init().
+//
+// There used to be a BLE_STATIC_PASSKEY here. It bought nothing: a passkey
+// only protects against an active MITM as long as the attacker cannot guess
+// it, and a value compiled into open-source firmware is not a secret. The
+// board has a single RGB LED, so it cannot display a random per-pairing
+// passkey either - which is why it now declares NO_IO and never asks for,
+// nor accepts, Passkey Entry. The link is still encrypted (LE Secure
+// Connections / ECDH), so passive eavesdropping remains defeated.
 
 // Minimum RSSI to accept a keyboard in pairing mode (dBm)
 #define BLE_PAIRING_RSSI_MIN    (-80)

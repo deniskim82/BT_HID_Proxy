@@ -117,6 +117,11 @@ static char s_best_name[32];
 static volatile uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static bool s_enc_retried = false;
 
+// Set when a peer demanded Passkey Entry / numeric comparison, which this
+// device cannot service. Held so the failure can be surfaced on the LED long
+// enough to be noticed instead of flashing past on the way to a retry.
+static bool s_passkey_refused = false;
+
 // GATT discovery context
 static uint16_t s_svc_start_handle, s_svc_end_handle;
 static hid_chr_t s_chrs[MAX_HID_CHRS];
@@ -922,24 +927,20 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         }
         return 0;
 
-    case BLE_GAP_EVENT_PASSKEY_ACTION: {
-        struct ble_sm_io io;
-        memset(&io, 0, sizeof(io));
-        io.action = event->passkey.params.action;
-
-        if (io.action == BLE_SM_IOACT_DISP) {
-            io.passkey = BLE_STATIC_PASSKEY;
-            ESP_LOGI(TAG, "==> Type passkey %06d on the keyboard and press Enter",
-                     (int)io.passkey);
-            ble_sm_inject_io(event->passkey.conn_handle, &io);
-        } else if (io.action == BLE_SM_IOACT_NUMCMP) {
-            io.numcmp_accept = 1;
-            ble_sm_inject_io(event->passkey.conn_handle, &io);
-        } else {
-            ESP_LOGW(TAG, "Unsupported passkey action: %d", io.action);
-        }
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+        // Declaring NO_IO should make every peer settle on Just Works, so
+        // reaching this point means the keyboard insisted on an authenticated
+        // method anyway. There is no honest way to service it: no display for
+        // a passkey we generate, no keypad for one it generates, and no
+        // yes/no button for numeric comparison. Answering with a canned value
+        // would be security theatre, so refuse and drop the link - a visible
+        // failure beats a link the user believes is authenticated.
+        ESP_LOGE(TAG, "Keyboard demands authenticated pairing (action=%d) - "
+                      "unsupported: this device has no display or keypad. "
+                      "Aborting.", event->passkey.params.action);
+        s_passkey_refused = true;
+        fail_connection();
         return 0;
-    }
 
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
         // Peer wants to re-pair although we already have a bond: drop the old
@@ -1053,6 +1054,7 @@ static void run_pairing(void)
     s_best_rssi = -128;
     memset(s_best_name, 0, sizeof(s_best_name));
     s_pairing_mode = true;
+    s_passkey_refused = false;
     set_state(BLE_HID_STATE_PAIRING);
 
     xEventGroupClearBits(s_events, EVT_SCAN_DONE | EVT_READY | EVT_FAILED);
@@ -1093,12 +1095,17 @@ static void run_pairing(void)
         save_current_peer_as_target();
         ESP_LOGI(TAG, "Pairing complete");
     } else {
-        ESP_LOGW(TAG, "Pairing failed");
+        if (s_passkey_refused) {
+            ESP_LOGE(TAG, "Pairing failed: keyboard requires a passkey, which "
+                          "this device cannot enter or display");
+        } else {
+            ESP_LOGW(TAG, "Pairing failed");
+        }
         if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
             ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
         set_state(BLE_HID_STATE_ERROR);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(s_passkey_refused ? 5000 : 1000));
         set_state(BLE_HID_STATE_IDLE);
     }
 
@@ -1230,13 +1237,25 @@ esp_err_t ble_hid_host_init(ble_hid_keyboard_cb_t keyboard_cb, ble_hid_state_cb_
         return ret;
     }
 
-    // Host configuration: bondable central with a displayable static passkey
+    // Host configuration: bondable central, encrypted but passkey-free.
+    //
+    // NO_IO is an honest declaration: the board has one RGB LED and no keypad,
+    // so it can neither show a six-digit passkey nor take one in. Claiming
+    // DISP_ONLY (as this firmware used to) makes the pairing algorithm select
+    // Passkey Entry, which we could then only answer with a hardcoded value -
+    // all of the UX cost, none of the protection.
+    //
+    // With NO_IO on either side the spec mandates Just Works, so this also
+    // stops a keyboard from steering us into Passkey Entry, not just stops us
+    // from requesting it. sm_sc stays on: LESC/ECDH still encrypts the link
+    // and defeats passive eavesdropping. Only active MITM during the one-time
+    // pairing is out of scope - see the security section in the README.
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
-    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
     ble_hs_cfg.sm_bonding = 1;
-    ble_hs_cfg.sm_mitm = 1;
+    ble_hs_cfg.sm_mitm = 0;
     ble_hs_cfg.sm_sc = 1;
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;

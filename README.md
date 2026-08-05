@@ -73,7 +73,8 @@ This project enables using a BLE keyboard with PCs that don't have Bluetooth sup
 - **Single-writer UART**: all CH9329 frames go through one TX task and queue,
   so frames can never interleave (previously a source of dropped keys)
 - **Pairing mode**: long-press button (5 s) to pair a new keyboard
-- **Static passkey**: keyboards that require Passkey Entry use code `123456`
+- **Passkey-free pairing**: the link is encrypted with LE Secure Connections,
+  but no code is ever asked for or typed (see [Security model](#security-model))
 
 ## Operation
 
@@ -88,8 +89,10 @@ This project enables using a BLE keyboard with PCs that don't have Bluetooth sup
 1. Put your BLE keyboard in pairing mode
 2. Long-press the M5Stamp Pico button for 5+ seconds
 3. The proxy scans for ~6 s and connects to the strongest HID keyboard found
-4. If the keyboard asks for a passkey, type `123456` on it and press Enter
+4. No passkey is involved — pairing completes on its own
 5. The new bond replaces any previous pairing
+
+> Pair in a place you trust. See [Security model](#security-model) for why.
 
 ### States & LED Indicators
 
@@ -149,7 +152,6 @@ idf.py -p /dev/ttyUSB0 monitor
 
 // Pairing
 #define BUTTON_LONG_PRESS_MS    5000     // Pairing mode trigger
-#define BLE_STATIC_PASSKEY      123456   // Passkey Entry code
 ```
 
 ### CH9329 Baud Rate
@@ -249,7 +251,7 @@ Standard 8-byte boot format:
 | Source keyboard rollover | 6KRO or NKRO, either works identically — see NKRO support above |
 | UART link (ESP32 ↔ CH9329) | 115200 baud, 8 data bits, no parity, 1 stop bit, no flow control |
 | UART bandwidth used | ~16% at the input rate ceiling (a 14-byte frame costs ~1.2 ms against an ~11.5 kB/s link) |
-| Pairing security | LE Secure Connections (LESC), Passkey Entry with MITM protection |
+| Pairing security | LE Secure Connections (LESC/ECDH), Just Works — no passkey (see [Security model](#security-model)) |
 | Simultaneous keyboards | 1 (see `CLAUDE.md` for what raising this would take) |
 
 ### Estimated end-to-end input latency
@@ -263,6 +265,37 @@ Estimated from protocol timings, not a bench measurement:
 | UART frame (14 bytes @ 115200) | ~1.2 ms | Header(5) + data(8) + checksum(1) |
 | CH9329 internal processing → USB | a few ms | Not specified in the datasheet; typical for a Full-Speed HID interrupt endpoint |
 | **Total (approximate)** | **~10–20 ms** | Comparable to a typical RF-dongle wireless keyboard, well under the ~200 ms most people notice as lag |
+
+## Security model
+
+**What is protected.** Every BLE link is encrypted with LE Secure Connections
+(ECDH key exchange, AES-CCM). Someone sniffing the air cannot recover your
+keystrokes — not while you type, and not by capturing the pairing and
+decrypting the session afterwards. After the first pairing the bond (LTK) is
+stored in NVS and reused, so the pairing handshake does not happen again.
+
+**What is not protected.** Pairing uses the *Just Works* association model,
+which does not authenticate the peer. During the few seconds of an initial
+pairing, an attacker physically nearby with BLE test equipment could in
+principle insert themselves between the keyboard and the proxy.
+
+**Why it is built this way.** Defeating that attack requires an authenticated
+association model — Passkey Entry or Numeric Comparison — and both need the
+two devices to compare a random six-digit number through a channel the
+attacker does not control. This board has one RGB LED. It cannot show a
+six-digit number and has no keypad to accept one. Earlier firmware papered
+over this with a passkey hardcoded to `123456` and printed in this very
+README, which is not a secret and therefore protected nothing while still
+making the user type six digits. The device now declares its true capability
+(`NO_IO`), which under the Bluetooth spec means both sides settle on Just
+Works, and it refuses pairing outright if a keyboard demands a passkey rather
+than pretending to authenticate.
+
+**What this means in practice.** Do your initial pairing somewhere you trust —
+at home or at your desk, not in a café, airport, or conference hall. It is a
+one-time, few-second window; from then on the stored bond is used and no
+further pairing occurs. If you ever re-pair (new keyboard, or after the bond
+is dropped), apply the same rule.
 
 ## References
 
@@ -293,8 +326,14 @@ MIT License - See [LICENSE](LICENSE) file.
 3. Check serial monitor for scan results; keyboards are matched by HID service
    UUID or appearance in their advertisement
 
-### Keyboard asks for a code
-Type `123456` on the keyboard and press Enter (`BLE_STATIC_PASSKEY`).
+### Keyboard asks for a code / LED goes red during pairing
+This device declares no input and no display capability, so pairing normally
+completes with no code at all. If a keyboard insists on Passkey Entry anyway,
+the proxy refuses and aborts: the LED shows the error pattern for ~5 s and the
+log says `Keyboard demands authenticated pairing`. There is no workaround on
+this hardware — see [Security model](#security-model). Some keyboards have a
+non-authenticated pairing mode (often the "PC/tablet" or non-Apple profile);
+otherwise the keyboard is not usable with this proxy.
 
 ### Keys not registering
 1. Verify CH9329 wiring (TX→RXD, RX→TXD)
