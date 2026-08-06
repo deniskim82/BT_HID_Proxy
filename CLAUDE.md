@@ -54,6 +54,27 @@ Other items considered but deliberately deferred:
   merge layer (`key_state`) and the device index in the callbacks already
   account for this.
 
+## Pairing security: why there is no passkey
+
+The board has one RGB LED, so it cannot display a random six-digit passkey nor
+accept one. It therefore declares `BLE_SM_IO_CAP_NO_IO` with `sm_mitm = 0`,
+which under the spec forces Just Works on both sides — this stops a keyboard
+from steering us into Passkey Entry, not just stops us from asking. `sm_sc = 1`
+stays on, so LESC/ECDH still encrypts the link and passive eavesdropping is
+defeated; only active MITM during the one-time pairing is out of scope.
+
+An earlier `BLE_STATIC_PASSKEY 123456` was worse than nothing: printed in the
+README, so no secret, hence no MITM protection, while still charging the user
+six keystrokes. There is **no standard default BLE passkey** — `0000`/`000000`
+in device manuals is a legacy BR/EDR PIN convention, not a spec value.
+
+Nor is there a way to show a passkey to the user through the PC. HID is a
+one-way input protocol with no channel for rendering text on the host, so the
+CH9329 path cannot do it; a future ESP32-S3 could enumerate a second interface
+(CDC, MSC, WebHID) to carry the value, but every such option requires software
+prepared on the PC, which forfeits the "just a plain USB keyboard, no drivers"
+property that motivates the project. Revisit only if a display part is added.
+
 ## Traps discovered the hard way
 
 - **CH9329 `0x0D` is `CMD_RESET`, not "get LED status".** There is no LED query
