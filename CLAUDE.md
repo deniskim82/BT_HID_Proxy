@@ -100,6 +100,28 @@ property that motivates the project. Revisit only if a display part is added.
 - `sdkconfig.defaults` changes do not apply to an existing `sdkconfig`; delete
   it and rebuild. Plain source edits need no `fullclean`.
 
+## Diagnostic build (`diag.c`) — temporary
+
+Added to chase a long-run fault: works all day, PC is powered off overnight
+with USB VBUS still live, and the next day the link wedges hard enough that
+only pulling power fixes it. Nothing in `diag.c` changes behaviour; it records
+counters and appends events to a ring buffer in the `storage` flash partition,
+which was declared in `partitions.csv` from the start and never used.
+
+Flash, not NVS, on purpose: bond churn wearing the 24 kB `nvs` partition is one
+of the suspects, and a diagnostic sharing that space would change what it is
+measuring. Flash also survives the unplug/replug that is the current recovery
+step, so the previous run's history is dumped on the next boot.
+
+Writes go through a dedicated low-priority task — an erase stalls the CPU for
+tens of milliseconds with the cache off, which must never happen inside a BLE
+callback. Nothing on the input path calls `diag_event()`.
+
+The one behavioural change is a `GET_INFO` poll every 60 s to watch the
+CH9329's USB enumeration state; its reply is logged only when it changes.
+
+Remove or quieten this once the fault is identified.
+
 ## Build
 
 ESP-IDF v5.1.x (CI pins v5.1.2). `idf.py set-target esp32 && idf.py build`.

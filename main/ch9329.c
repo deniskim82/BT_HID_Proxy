@@ -9,6 +9,7 @@
 
 #include "ch9329.h"
 #include "config.h"
+#include "diag.h"
 #include <string.h>
 #include "driver/uart.h"
 #include "esp_log.h"
@@ -214,11 +215,26 @@ static void parse_rx_frame(const uint8_t *data, size_t len)
         uint8_t version = data[5];
         uint8_t usb_status = data[6];
 
-        ESP_LOGI(TAG, "CH9329 INFO: version=0x%02X usb_status=0x%02X -> USB %s",
-                 version, usb_status,
-                 usb_status ? "ENUMERATED (host sees the device)"
-                            : "NOT ENUMERATED (chip alive, USB side is the fault)");
-        ESP_LOG_BUFFER_HEX_LEVEL(TAG, &data[5], data_len, ESP_LOG_INFO);
+        // With the status now polled periodically, printing every reply would
+        // bury everything else. Print in full only while the boot-time budget
+        // lasts; after that, only a change is worth saying anything about -
+        // and a change is exactly what "the PC was off all night and the chip
+        // never came back" would look like.
+        static int s_last_usb_status = -1;
+        bool usb_changed = ((int)usb_status != s_last_usb_status);
+
+        if (usb_changed) {
+            diag_event("CH9329 usb_status 0x%02X -> %s", usb_status,
+                       usb_status ? "ENUMERATED" : "NOT ENUMERATED");
+            s_last_usb_status = usb_status;
+        }
+        if (s_rx_log_budget > 0 || usb_changed) {
+            ESP_LOGI(TAG, "CH9329 INFO: version=0x%02X usb_status=0x%02X -> USB %s",
+                     version, usb_status,
+                     usb_status ? "ENUMERATED (host sees the device)"
+                                : "NOT ENUMERATED (chip alive, USB side is the fault)");
+            ESP_LOG_BUFFER_HEX_LEVEL(TAG, &data[5], data_len, ESP_LOG_INFO);
+        }
 
         // The host's Caps/Num/Scroll state rides along in this same reply -
         // there is no separate LED query command on this chip.
@@ -364,6 +380,7 @@ static esp_err_t enqueue_msg(const tx_msg_t *msg)
     // conditions; never called from ISR context.
     if (xQueueSend(s_tx_queue, msg, pdMS_TO_TICKS(20)) != pdTRUE) {
         ESP_LOGW(TAG, "TX queue full, dropping msg type %d", msg->type);
+        g_diag.tx_drops++;
         return ESP_ERR_TIMEOUT;
     }
     return ESP_OK;
