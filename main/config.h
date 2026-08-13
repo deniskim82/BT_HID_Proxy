@@ -71,6 +71,21 @@
 #define BLE_PAIRING_RSSI_MIN    (-80)
 
 /* ============================================================================
+ * Diagnostics
+ * ============================================================================ */
+
+// Health line cadence (milliseconds) and how often it is also written to the
+// persistent log. Console every minute, flash every fifth minute: the ring
+// then spans days instead of hours, which is the timescale of the fault it
+// exists to catch.
+#define DIAG_HEALTH_TICK_MS         60000
+#define DIAG_HEALTH_PERSIST_EVERY   5
+
+// How long a connected link may go without input before the spell is recorded
+// (milliseconds). Long enough that ordinary pauses at a desk are ignored.
+#define DIAG_SILENT_LINK_MS         (15 * 60 * 1000)
+
+/* ============================================================================
  * CH9329 Configuration
  * ============================================================================ */
 

@@ -92,6 +92,19 @@ esp_err_t ble_hid_host_send_led_status(uint8_t led_status);
 ble_hid_state_t ble_hid_host_get_state(void);
 bool ble_hid_host_is_connected(void);
 
+/**
+ * @brief Milliseconds since the last input report arrived (0 if none yet).
+ *
+ * Diagnostics. A connected link that has gone quiet for hours is normal at
+ * night and pathological during the day; only the caller knows which.
+ */
+uint32_t ble_hid_host_ms_since_input(void);
+
+/**
+ * @brief Free entries in NimBLE's mbuf pool, for leak watching.
+ */
+int ble_hid_host_mbuf_free(void);
+
 #ifdef __cplusplus
 }
 #endif

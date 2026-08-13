@@ -22,6 +22,7 @@
 #include "esp_timer.h"
 
 #include "config.h"
+#include "diag.h"
 #include "storage.h"
 #include "ch9329.h"
 #include "ble_hid_host.h"
@@ -42,6 +43,9 @@ static esp_timer_handle_t s_led_poll_timer = NULL;
 
 static uint8_t s_prev_keys[KEY_STATE_MAX_KEYS] = {0};
 static int s_prev_key_count = 0;
+
+// Set from the button callback, serviced by the main task (see on_button_event)
+static volatile bool s_dump_requested = false;
 
 /* ============================================================================
  * LED state polling
@@ -201,6 +205,97 @@ static void on_button_event(button_event_t event)
         ESP_LOGI(TAG, "Short press: querying CH9329 status");
         ch9329_request_info();
         ch9329_request_para_cfg();
+        // Ask the main task to dump the persistent log, so the history can be
+        // read at a console without waiting for (or forcing) a reboot.
+        // Dumping here would hold the Timer Service task for seconds.
+        s_dump_requested = true;
+    }
+}
+
+/* ============================================================================
+ * Health monitoring
+ * ============================================================================ */
+
+static const char *state_name(ble_hid_state_t s)
+{
+    switch (s) {
+    case BLE_HID_STATE_IDLE:       return "IDLE";
+    case BLE_HID_STATE_SCANNING:   return "SCAN";
+    case BLE_HID_STATE_CONNECTING: return "CONN?";
+    case BLE_HID_STATE_CONNECTED:  return "CONN";
+    case BLE_HID_STATE_PAIRING:    return "PAIR";
+    case BLE_HID_STATE_ERROR:      return "ERR";
+    default:                       return "?";
+    }
+}
+
+/**
+ * @brief One line describing everything that drifts over a long run.
+ *
+ * The three resource figures matter most. Free heap falling steadily points
+ * at a leak; min-free heap records the worst moment even if it recovered; and
+ * free mbufs is where a NimBLE leak shows first, because that pool is fixed
+ * at init and a link can look alive right up until it runs dry.
+ */
+static void health_tick(bool persist)
+{
+    char up[16];
+    diag_format_uptime(diag_uptime_s(), up, sizeof(up));
+
+    char line[160];
+    snprintf(line, sizeof(line),
+             "%s st=%s conn=%u/%u(r=0x%02x) enc!=%u bond-=%u rep=%u upd=%u "
+             "in=%u led=%u drop=%u heap=%u/%u mbuf=%d",
+             up, state_name(ble_hid_host_get_state()),
+             (unsigned)g_diag.connects, (unsigned)g_diag.disconnects,
+             (unsigned)g_diag.last_disc_reason,
+             (unsigned)g_diag.enc_failures, (unsigned)g_diag.bond_deletes,
+             (unsigned)g_diag.repeat_pairings, (unsigned)g_diag.conn_updates,
+             (unsigned)g_diag.notifications, (unsigned)g_diag.led_writes,
+             (unsigned)g_diag.tx_drops,
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)esp_get_minimum_free_heap_size(),
+             ble_hid_host_mbuf_free());
+
+    ESP_LOGI(TAG, "HEALTH %s", line);
+
+    if (persist) {
+        // The ring record holds less than this line, so persist the figures
+        // that only make sense as a trend and drop the ones that are also
+        // reported as events when they change.
+        diag_event("H %s h=%u/%u m=%d c=%u/%u",
+                   state_name(ble_hid_host_get_state()),
+                   (unsigned)esp_get_free_heap_size(),
+                   (unsigned)esp_get_minimum_free_heap_size(),
+                   ble_hid_host_mbuf_free(),
+                   (unsigned)g_diag.connects, (unsigned)g_diag.disconnects);
+    }
+}
+
+/**
+ * @brief Record both ends of a spell where the link is up but nothing arrives.
+ *
+ * Silence is not a fault by itself - nobody types at night. It becomes
+ * evidence only in combination, which is why the end of the spell is logged
+ * too: silence that ends with input was just an idle keyboard, while silence
+ * that ends only at a disconnect or a reboot is the failure being chased.
+ */
+static void check_silent_link(bool *silent)
+{
+    if (ble_hid_host_get_state() != BLE_HID_STATE_CONNECTED) {
+        *silent = false;
+        return;
+    }
+
+    uint32_t idle_ms = ble_hid_host_ms_since_input();
+
+    if (!*silent && idle_ms >= DIAG_SILENT_LINK_MS) {
+        *silent = true;
+        g_diag.silent_episodes++;
+        diag_event("SILENT link up, no input for %umin", (unsigned)(idle_ms / 60000));
+    } else if (*silent && idle_ms < DIAG_SILENT_LINK_MS) {
+        *silent = false;
+        diag_event("SILENT ended, input resumed");
     }
 }
 
@@ -215,6 +310,10 @@ static esp_err_t init_all(void)
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "BT HID Proxy (BLE/NimBLE) - Initializing");
     ESP_LOGI(TAG, "========================================");
+
+    // First, so the previous run's log is dumped before anything overwrites
+    // it and so the boot marker records why we restarted.
+    diag_init();
 
     ret = storage_init();
     if (ret != ESP_OK) {
@@ -271,11 +370,33 @@ void app_main(void)
         return;
     }
 
-    // Main task: periodic health log only
+    // Main task: health tick. Console every minute, persisted every fifth one
+    // so the flash ring covers days rather than hours. The loop runs once a
+    // second only so a dump request does not have to wait for the tick.
+    int tick = 0;
+    uint32_t elapsed_ms = 0;
+    bool silent = false;
+
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(60000));
-        ESP_LOGD(TAG, "State: %d, free heap: %lu",
-                 ble_hid_host_get_state(),
-                 (unsigned long)esp_get_free_heap_size());
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        if (s_dump_requested) {
+            s_dump_requested = false;
+            diag_dump();
+        }
+
+        elapsed_ms += 1000;
+        if (elapsed_ms < DIAG_HEALTH_TICK_MS) {
+            continue;
+        }
+        elapsed_ms = 0;
+        tick++;
+
+        health_tick(tick % DIAG_HEALTH_PERSIST_EVERY == 0);
+        check_silent_link(&silent);
+
+        // Refresh the CH9329's USB enumeration state. The reply is only
+        // logged when it changes, so this is quiet unless something happens.
+        ch9329_request_info();
     }
 }

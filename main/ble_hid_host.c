@@ -21,8 +21,10 @@
 #include "key_state.h"
 #include "storage.h"
 #include "config.h"
+#include "diag.h"
 
 #include <string.h>
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -30,6 +32,7 @@
 #include "freertos/event_groups.h"
 #include "esp_log.h"
 
+#include "os/os_mbuf.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -122,6 +125,12 @@ static bool s_enc_retried = false;
 // enough to be noticed instead of flashing past on the way to a retry.
 static bool s_passkey_refused = false;
 
+// Diagnostics: when the last input report arrived. A link that is up but has
+// gone silent looks identical to an idle one from the outside, and the two
+// are told apart only by how long the silence lasts and what happens when it
+// ends - so both ends of every silent spell are recorded.
+static volatile int64_t s_last_input_us = 0;
+
 // GATT discovery context
 static uint16_t s_svc_start_handle, s_svc_end_handle;
 static hid_chr_t s_chrs[MAX_HID_CHRS];
@@ -198,6 +207,29 @@ static void reset_disc_ctx(void)
     memset(s_subs, 0, sizeof(s_subs));
     s_led_output_val_handle = 0;
     memset(s_chrs, 0, sizeof(s_chrs));
+}
+
+/**
+ * @brief Record the connection parameters actually in force.
+ *
+ * The requested range is only a request. What matters for the keyboard's
+ * power budget is what was negotiated - above all the slave latency, which
+ * decides whether the keyboard may skip connection events while idle or has
+ * to wake its radio every interval, all night.
+ */
+static void diag_log_conn_params(uint16_t conn_handle, const char *when)
+{
+    struct ble_gap_conn_desc desc;
+    if (ble_gap_conn_find(conn_handle, &desc) != 0) {
+        return;
+    }
+    // Interval is in 1.25 ms units; kept in integer hundredths of a
+    // millisecond so the line stays readable without float formatting.
+    unsigned itvl_cms = (unsigned)desc.conn_itvl * 125u;
+    diag_event("params %s itvl=%u.%02ums lat=%u sup=%ums", when,
+               itvl_cms / 100u, itvl_cms % 100u,
+               (unsigned)desc.conn_latency,
+               (unsigned)desc.supervision_timeout * 10u);
 }
 
 static void fail_connection(void)
@@ -764,6 +796,11 @@ static void handle_input_notification(int sub_idx, const kb_sub_t *sub,
     }
     os_mbuf_copydata(om, 0, len, raw);
 
+    // Two cheap stores; deliberately no diag_event() here - this is the hot
+    // path and the persistent log must never be touched from it.
+    g_diag.notifications++;
+    s_last_input_us = esp_timer_get_time();
+
     if (sub->ext != NULL) {
         uint16_t usages[8];
         int n = hid_parser_extract_usages(sub->ext, raw, len, usages,
@@ -877,6 +914,10 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             s_enc_retried = false;
             ESP_LOGI(TAG, "Connected (handle=%d), initiating security",
                      s_conn_handle);
+            g_diag.connects++;
+            s_last_input_us = esp_timer_get_time();
+            diag_event("CONNECT #%u", (unsigned)g_diag.connects);
+            diag_log_conn_params(s_conn_handle, "at-connect");
 
             ble_gattc_exchange_mtu(s_conn_handle, mtu_cb, NULL);
 
@@ -894,6 +935,16 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "Disconnected (reason=%d)", event->disconnect.reason);
+        g_diag.disconnects++;
+        g_diag.last_disc_reason = event->disconnect.reason;
+        // 0x208 is BLE_HS_HCI_ERR(0x08), supervision timeout: the link died
+        // on the air rather than being taken down by either side. A night of
+        // those means the radio link is flapping, not that anything decided
+        // to disconnect.
+        diag_event("DISCONNECT #%u reason=0x%02x%s",
+                   (unsigned)g_diag.disconnects, event->disconnect.reason,
+                   event->disconnect.reason == BLE_HS_HCI_ERR(BLE_ERR_CONN_SPVN_TMO)
+                       ? " (supervision timeout)" : "");
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         reset_disc_ctx();
         if (!s_pairing_mode) {
@@ -908,6 +959,12 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
             start_discovery();
         } else {
             ESP_LOGW(TAG, "Encryption failed: %d", event->enc_change.status);
+            g_diag.enc_failures++;
+            // Each trip through here deletes a bond and re-pairs, and every
+            // re-pair is an NVS write. A high count over a night is the
+            // signature of bond churn wearing the NVS partition.
+            diag_event("ENC FAIL #%u status=%d (bond will be dropped)",
+                       (unsigned)g_diag.enc_failures, event->enc_change.status);
             // Typical cause: the keyboard dropped our bond (e.g. its pairing
             // slot was reused on another host). Delete ours and retry once,
             // which triggers fresh pairing.
@@ -916,6 +973,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
                 struct ble_gap_conn_desc desc;
                 if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
                     ble_store_util_delete_peer(&desc.peer_id_addr);
+                    g_diag.bond_deletes++;
                 }
                 int rc = ble_gap_security_initiate(event->enc_change.conn_handle);
                 if (rc != 0) {
@@ -949,7 +1007,11 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         struct ble_gap_conn_desc desc;
         if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
             ble_store_util_delete_peer(&desc.peer_id_addr);
+            g_diag.bond_deletes++;
         }
+        g_diag.repeat_pairings++;
+        diag_event("REPEAT PAIRING #%u (bond dropped, re-pairing)",
+                   (unsigned)g_diag.repeat_pairings);
         return BLE_GAP_REPEAT_PAIRING_RETRY;
     }
 
@@ -971,7 +1033,23 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         // Accept whatever the keyboard asks for (it knows its power budget)
         if (event->conn_update_req.self_params != NULL &&
             event->conn_update_req.peer_params != NULL) {
+            const struct ble_gap_upd_params *p = event->conn_update_req.peer_params;
+            // A keyboard that never sends this is stuck with whatever the
+            // central asked for - which, here, is latency 0.
+            diag_event("PEER WANTS itvl=%u-%u lat=%u sup=%ums",
+                       (unsigned)p->itvl_min, (unsigned)p->itvl_max,
+                       (unsigned)p->latency,
+                       (unsigned)p->supervision_timeout * 10u);
             *event->conn_update_req.self_params = *event->conn_update_req.peer_params;
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_CONN_UPDATE:
+        g_diag.conn_updates++;
+        if (event->conn_update.status == 0) {
+            diag_log_conn_params(event->conn_update.conn_handle, "updated");
+        } else {
+            diag_event("PARAM UPDATE FAILED status=%d", event->conn_update.status);
         }
         return 0;
 
@@ -1306,9 +1384,30 @@ esp_err_t ble_hid_host_send_led_status(uint8_t led_status)
     int rc = ble_gattc_write_no_rsp_flat(conn, handle, &led_status, 1);
     if (rc != 0) {
         ESP_LOGW(TAG, "LED write failed: %d", rc);
+        diag_event("LED WRITE FAILED rc=%d", rc);
         return ESP_FAIL;
     }
+    g_diag.led_writes++;
     return ESP_OK;
+}
+
+uint32_t ble_hid_host_ms_since_input(void)
+{
+    int64_t last = s_last_input_us;
+    if (last == 0) {
+        return 0;
+    }
+    return (uint32_t)((esp_timer_get_time() - last) / 1000);
+}
+
+int ble_hid_host_mbuf_free(void)
+{
+    // NimBLE allocates every ATT/GATT packet from this pool. It is fixed at
+    // init and never grows, so a slow leak across thousands of reconnect
+    // cycles shows up here long before it shows up in the heap - and when it
+    // hits zero the host stops being able to talk while the link-layer
+    // connection still looks perfectly healthy.
+    return os_msys_num_free();
 }
 
 ble_hid_state_t ble_hid_host_get_state(void)
